@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "lms-backend"
+version = "0.1.0"
+description = ""
+authors = ["mont3ll <meluseno@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+django = "^5.2"
+djangorestframework = "^3.16.0"
+python-dotenv = "^1.1.0"
+django-cors-headers = "^4.7.0"
+psycopg2-binary = "^2.9.10"
+djangorestframework-simplejwt = "^5.5.0"
+drf-spectacular = "^0.28.0"
+redis = "^5.2.1"
+celery = "^5.5.0"
+requests = "^2.32.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
