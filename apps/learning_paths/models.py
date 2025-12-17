@@ -200,3 +200,265 @@ class LearningPathStepProgress(TimestampedModel):
 #     class Meta:
 #         unique_together = ('user', 'learning_path')
 #         ordering = ['learning_path', 'user']
+
+
+# =============================================================================
+# Personalized Learning Path Models (AI-Generated)
+# =============================================================================
+
+
+class PersonalizedLearningPath(TimestampedModel):
+    """
+    AI-generated learning path tailored to an individual user's needs.
+    
+    Unlike curated LearningPaths which are shared across users, personalized
+    paths are generated specifically for one user based on their skill gaps,
+    goals, or remediation needs.
+    """
+
+    class GenerationType(models.TextChoices):
+        SKILL_GAP = "SKILL_GAP", _("Skill Gap Based")
+        REMEDIAL = "REMEDIAL", _("Remedial/Recovery")
+        GOAL_BASED = "GOAL_BASED", _("Goal Based")
+        ONBOARDING = "ONBOARDING", _("Onboarding")
+
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", _("Active")
+        COMPLETED = "COMPLETED", _("Completed")
+        EXPIRED = "EXPIRED", _("Expired")
+        ARCHIVED = "ARCHIVED", _("Archived")
+
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='personalized_learning_paths'
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='personalized_learning_paths'
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    generation_type = models.CharField(
+        max_length=20,
+        choices=GenerationType.choices,
+        db_index=True
+    )
+    target_skills = models.ManyToManyField(
+        'skills.Skill',
+        related_name='targeting_personalized_paths',
+        blank=True,
+        help_text="Skills this path aims to develop"
+    )
+    estimated_duration = models.PositiveIntegerField(
+        help_text="Estimated duration in hours"
+    )
+    status = models.CharField(
+        max_length=15,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True
+    )
+    generated_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Path may become stale after this date"
+    )
+    generation_params = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Parameters used by the algorithm to generate this path"
+    )
+
+    class Meta:
+        ordering = ['-generated_at']
+        verbose_name = "Personalized Learning Path"
+        verbose_name_plural = "Personalized Learning Paths"
+
+    def __str__(self):
+        return f"{self.title} - {self.user.email} ({self.generation_type})"
+
+    @property
+    def is_expired(self):
+        """Check if the path has expired."""
+        from django.utils import timezone
+        if self.expires_at is None:
+            return False
+        return timezone.now() > self.expires_at
+
+    @property
+    def total_steps(self):
+        """Return the total number of steps in this path."""
+        return self.steps.count()
+
+    @property
+    def required_steps_count(self):
+        """Return the count of required steps."""
+        return self.steps.filter(is_required=True).count()
+
+
+class PersonalizedPathStep(TimestampedModel):
+    """
+    A single step within a personalized learning path.
+    
+    Each step links to a specific Module and includes metadata about
+    why this module was included in the user's personalized path.
+    """
+
+    path = models.ForeignKey(
+        PersonalizedLearningPath,
+        on_delete=models.CASCADE,
+        related_name='steps'
+    )
+    module = models.ForeignKey(
+        Module,
+        on_delete=models.CASCADE,
+        related_name='personalized_path_steps'
+    )
+    order = models.PositiveIntegerField(
+        help_text="Order of this step within the path"
+    )
+    is_required = models.BooleanField(
+        default=True,
+        help_text="Is this step mandatory to complete the path?"
+    )
+    reason = models.TextField(
+        blank=True,
+        help_text="AI-generated explanation of why this module was included"
+    )
+    estimated_duration = models.PositiveIntegerField(
+        help_text="Estimated duration in minutes"
+    )
+    target_skills = models.ManyToManyField(
+        'skills.Skill',
+        related_name='personalized_path_steps',
+        blank=True,
+        help_text="Specific skills this step addresses"
+    )
+
+    class Meta:
+        ordering = ['path', 'order']
+        unique_together = ('path', 'order')
+        verbose_name = "Personalized Path Step"
+        verbose_name_plural = "Personalized Path Steps"
+
+    def __str__(self):
+        return f"Step {self.order}: {self.module.title} (Path: {self.path.title})"
+
+
+class PersonalizedPathProgress(TimestampedModel):
+    """
+    Track user progress through a personalized learning path.
+    
+    While PersonalizedLearningPath already has a user FK, this model
+    allows tracking detailed progress state separately, similar to
+    how LearningPathProgress works for curated paths.
+    """
+
+    class Status(models.TextChoices):
+        NOT_STARTED = "NOT_STARTED", _("Not Started")
+        IN_PROGRESS = "IN_PROGRESS", _("In Progress")
+        COMPLETED = "COMPLETED", _("Completed")
+        PAUSED = "PAUSED", _("Paused")
+        ABANDONED = "ABANDONED", _("Abandoned")
+
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='personalized_path_progress'
+    )
+    path = models.ForeignKey(
+        PersonalizedLearningPath,
+        on_delete=models.CASCADE,
+        related_name='progress_records'
+    )
+    status = models.CharField(
+        max_length=15,
+        choices=Status.choices,
+        default=Status.NOT_STARTED,
+        db_index=True
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    current_step_order = models.PositiveIntegerField(
+        default=0,
+        help_text="Order of the current step (0 means not started)"
+    )
+    last_activity_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last user activity on this path"
+    )
+
+    class Meta:
+        unique_together = ('user', 'path')
+        ordering = ['-updated_at']
+        verbose_name = "Personalized Path Progress"
+        verbose_name_plural = "Personalized Path Progress Records"
+
+    def __str__(self):
+        return f"{self.user.email} - {self.path.title} ({self.status})"
+
+    @property
+    def progress_percentage(self):
+        """Calculate progress percentage based on completed steps."""
+        total_steps = self.path.steps.count()
+        if total_steps == 0:
+            return 0
+        # Count steps where the user has completed all content items in the module
+        completed_count = 0
+        for step in self.path.steps.all():
+            if self._is_module_completed(step.module):
+                completed_count += 1
+        return (completed_count / total_steps) * 100
+
+    def _is_module_completed(self, module):
+        """
+        Check if user has completed all content items in a module.
+        
+        A module is considered complete when all its content items
+        have been marked as completed through the user's enrollment.
+        """
+        from apps.enrollments.models import LearnerProgress, Enrollment
+        
+        # Get content items in this module
+        content_items = module.content_items.all()
+        if not content_items.exists():
+            # Module with no content is considered complete
+            return True
+        
+        # Get user's enrollments for the module's course
+        enrollments = Enrollment.objects.filter(
+            user=self.user,
+            course=module.course,
+            status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+        )
+        
+        if not enrollments.exists():
+            return False
+        
+        # Check if all content items are completed in any enrollment
+        for enrollment in enrollments:
+            completed_items = LearnerProgress.objects.filter(
+                enrollment=enrollment,
+                content_item__in=content_items,
+                status=LearnerProgress.Status.COMPLETED
+            ).count()
+            if completed_items == content_items.count():
+                return True
+        
+        return False
+
+    @property
+    def current_step(self):
+        """Get the current step the user should work on."""
+        if self.current_step_order == 0:
+            return self.path.steps.first()
+        return self.path.steps.filter(order=self.current_step_order).first()
+
+    @property
+    def next_step(self):
+        """Get the next step after the current one."""
+        return self.path.steps.filter(order__gt=self.current_step_order).first()
