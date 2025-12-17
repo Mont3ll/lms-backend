@@ -32,6 +32,12 @@ pylti1p3 = "^2.0.0"
 # SAML SSO integration
 python3-saml = "^1.16.0"
 cryptography = "^46.0.3"
+# Antivirus scanning
+pyclamd = "^0.4.0"
+# ML/AI libraries for recommendations and predictions
+scikit-learn = "^1.6.0"
+numpy = "^2.0.0"
+scipy = "^1.14.0"
 
 
 [build-system]

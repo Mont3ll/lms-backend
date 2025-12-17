@@ -429,7 +429,8 @@ class ProgressTrackerService:
 
         # 2. Check for completion
         course = enrollment.course
-        course_items = ContentItem.objects.filter(module__course=course, is_published=True)
+        # Only required items count towards completion
+        course_items = ContentItem.objects.filter(module__course=course, is_published=True, is_required=True)
         total_items_count = course_items.count()
 
         # Get published assessments for this course
@@ -536,11 +537,11 @@ class ProgressTrackerService:
 
     @staticmethod
     def calculate_course_progress_percentage(enrollment: Enrollment) -> int:
-        """Calculates the percentage of completed published content items for an enrollment."""
+        """Calculates the percentage of completed required, published content items for an enrollment."""
         course = enrollment.course
-        # TODO: Filter by required items if applicable
+        # Only count required items for progress calculation
         course_items = ContentItem.objects.filter(
-            module__course=course, is_published=True
+            module__course=course, is_published=True, is_required=True
         )
         total_items_count = course_items.count()
 

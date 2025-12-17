@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import File, Folder  # FileVersion might not need API exposure directly
+from .models import File, FileVersion, Folder
 
 
 class FolderSerializer(serializers.ModelSerializer):
@@ -110,3 +110,43 @@ class FileUploadSerializer(serializers.Serializer):
         return value
 
     # Save logic will be handled in the view/service using this serializer
+
+
+class FileVersionSerializer(serializers.ModelSerializer):
+    """Serializer for file versions."""
+
+    version_url = serializers.URLField(read_only=True)
+    user_email = serializers.EmailField(source="user.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = FileVersion
+        fields = (
+            "id",
+            "file_instance",
+            "version_number",
+            "storage_path",
+            "version_url",
+            "file_size",
+            "mime_type",
+            "comment",
+            "user_email",
+            "created_at",
+        )
+        read_only_fields = (
+            "id",
+            "file_instance",
+            "version_number",
+            "storage_path",
+            "version_url",
+            "file_size",
+            "mime_type",
+            "user_email",
+            "created_at",
+        )
+
+
+class FileVersionUploadSerializer(serializers.Serializer):
+    """Serializer for uploading a new file version."""
+
+    file = serializers.FileField(required=True)
+    comment = serializers.CharField(required=False, allow_blank=True, max_length=500)

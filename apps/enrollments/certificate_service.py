@@ -4,22 +4,128 @@ from datetime import datetime
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
+from reportlab.lib.units import inch, mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from .models import Certificate
 
 
 class CertificateService:
     """Service for generating and managing certificate PDFs."""
 
+    # Modern color palette
+    COLORS = {
+        'primary': colors.HexColor('#1e3a5f'),      # Deep navy blue
+        'secondary': colors.HexColor('#c9a227'),     # Gold accent
+        'accent': colors.HexColor('#2563eb'),        # Bright blue
+        'text_dark': colors.HexColor('#1f2937'),     # Dark gray
+        'text_medium': colors.HexColor('#4b5563'),   # Medium gray
+        'text_light': colors.HexColor('#6b7280'),    # Light gray
+        'border': colors.HexColor('#d4af37'),        # Golden border
+        'background': colors.HexColor('#fafafa'),    # Off-white background
+    }
+
+    @staticmethod
+    def _draw_decorative_border(c, width, height):
+        """Draw an elegant decorative border with corner ornaments."""
+        margin = 25 * mm
+        inner_margin = 30 * mm
+        
+        # Outer border - thick golden line
+        c.setStrokeColor(CertificateService.COLORS['secondary'])
+        c.setLineWidth(3)
+        c.rect(margin, margin, width - 2 * margin, height - 2 * margin)
+        
+        # Inner border - thin navy line
+        c.setStrokeColor(CertificateService.COLORS['primary'])
+        c.setLineWidth(1)
+        c.rect(inner_margin, inner_margin, width - 2 * inner_margin, height - 2 * inner_margin)
+        
+        # Corner decorative elements
+        corner_size = 15 * mm
+        c.setStrokeColor(CertificateService.COLORS['secondary'])
+        c.setLineWidth(2)
+        
+        # Top-left corner
+        c.line(margin, height - margin - corner_size, margin, height - margin)
+        c.line(margin, height - margin, margin + corner_size, height - margin)
+        
+        # Top-right corner
+        c.line(width - margin - corner_size, height - margin, width - margin, height - margin)
+        c.line(width - margin, height - margin, width - margin, height - margin - corner_size)
+        
+        # Bottom-left corner
+        c.line(margin, margin, margin + corner_size, margin)
+        c.line(margin, margin, margin, margin + corner_size)
+        
+        # Bottom-right corner
+        c.line(width - margin - corner_size, margin, width - margin, margin)
+        c.line(width - margin, margin, width - margin, margin + corner_size)
+        
+        # Decorative line under title area
+        line_y = height - 85 * mm
+        line_width = 80 * mm
+        center_x = width / 2
+        
+        c.setStrokeColor(CertificateService.COLORS['secondary'])
+        c.setLineWidth(1.5)
+        c.line(center_x - line_width, line_y, center_x + line_width, line_y)
+        
+        # Small diamond in the center of the line
+        diamond_size = 4 * mm
+        c.setFillColor(CertificateService.COLORS['secondary'])
+        path = c.beginPath()
+        path.moveTo(center_x, line_y + diamond_size)
+        path.lineTo(center_x + diamond_size, line_y)
+        path.lineTo(center_x, line_y - diamond_size)
+        path.lineTo(center_x - diamond_size, line_y)
+        path.close()
+        c.drawPath(path, fill=1, stroke=0)
+
+    @staticmethod
+    def _draw_seal(c, x, y, radius):
+        """Draw an official-looking seal/stamp."""
+        # Outer circle
+        c.setStrokeColor(CertificateService.COLORS['secondary'])
+        c.setLineWidth(2)
+        c.circle(x, y, radius, stroke=1, fill=0)
+        
+        # Inner circle
+        c.setLineWidth(1)
+        c.circle(x, y, radius - 5 * mm, stroke=1, fill=0)
+        
+        # Inner filled circle
+        c.setFillColor(CertificateService.COLORS['secondary'])
+        c.circle(x, y, radius - 10 * mm, stroke=0, fill=1)
+        
+        # Checkmark in center
+        c.setStrokeColor(colors.white)
+        c.setLineWidth(2)
+        c.line(x - 4 * mm, y, x - 1 * mm, y - 3 * mm)
+        c.line(x - 1 * mm, y - 3 * mm, x + 5 * mm, y + 4 * mm)
+
+    @staticmethod
+    def _draw_signature_line(c, x, y, width, label):
+        """Draw a signature line with label."""
+        c.setStrokeColor(CertificateService.COLORS['text_medium'])
+        c.setLineWidth(0.5)
+        c.line(x, y, x + width, y)
+        
+        c.setFillColor(CertificateService.COLORS['text_light'])
+        c.setFont('Helvetica', 9)
+        text_width = c.stringWidth(label, 'Helvetica', 9)
+        c.drawString(x + (width - text_width) / 2, y - 12, label)
+
     @staticmethod
     def generate_certificate_pdf(certificate: Certificate) -> str:
         """
-        Generate a PDF certificate and return the file URL.
+        Generate a modern, professionally designed PDF certificate.
         
         Args:
             certificate: Certificate instance
@@ -28,121 +134,121 @@ class CertificateService:
             str: URL to the generated PDF file
         """
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4)
-        styles = getSampleStyleSheet()
         
-        # Custom styles
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=28,
-            textColor=colors.HexColor('#1f2937'),
-            alignment=TA_CENTER,
-            spaceAfter=30,
-        )
+        # Use landscape A4 for a more traditional certificate look
+        page_width, page_height = landscape(A4)
         
-        subtitle_style = ParagraphStyle(
-            'CustomSubtitle',
-            parent=styles['Heading2'],
-            fontSize=18,
-            textColor=colors.HexColor('#374151'),
-            alignment=TA_CENTER,
-            spaceAfter=20,
-        )
+        c = canvas.Canvas(buffer, pagesize=landscape(A4))
         
-        body_style = ParagraphStyle(
-            'CustomBody',
-            parent=styles['Normal'],
-            fontSize=14,
-            textColor=colors.HexColor('#4b5563'),
-            alignment=TA_CENTER,
-            spaceAfter=15,
-        )
+        # Draw background color
+        c.setFillColor(CertificateService.COLORS['background'])
+        c.rect(0, 0, page_width, page_height, fill=1, stroke=0)
         
-        name_style = ParagraphStyle(
-            'CustomName',
-            parent=styles['Heading1'],
-            fontSize=24,
-            textColor=colors.HexColor('#059669'),
-            alignment=TA_CENTER,
-            spaceAfter=20,
-            fontName='Helvetica-Bold',
-        )
-
-        # Build the certificate content
-        content = []
+        # Draw decorative border
+        CertificateService._draw_decorative_border(c, page_width, page_height)
         
-        # Header/Logo space (you can add an actual logo later)
-        content.append(Spacer(1, 1 * inch))
+        # Certificate header - organization name
+        org_name = certificate.course.tenant.name if certificate.course.tenant else 'Learning Management System'
+        c.setFillColor(CertificateService.COLORS['primary'])
+        c.setFont('Helvetica-Bold', 14)
+        org_width = c.stringWidth(org_name, 'Helvetica-Bold', 14)
+        c.drawString((page_width - org_width) / 2, page_height - 55 * mm, org_name)
         
-        # Title
-        content.append(Paragraph("CERTIFICATE OF COMPLETION", title_style))
-        content.append(Spacer(1, 0.5 * inch))
+        # Main title
+        c.setFillColor(CertificateService.COLORS['primary'])
+        c.setFont('Helvetica-Bold', 36)
+        title = "CERTIFICATE"
+        title_width = c.stringWidth(title, 'Helvetica-Bold', 36)
+        c.drawString((page_width - title_width) / 2, page_height - 75 * mm, title)
         
         # Subtitle
-        content.append(Paragraph("This is to certify that", subtitle_style))
-        content.append(Spacer(1, 0.2 * inch))
+        c.setFont('Helvetica', 16)
+        c.setFillColor(CertificateService.COLORS['secondary'])
+        subtitle = "OF COMPLETION"
+        subtitle_width = c.stringWidth(subtitle, 'Helvetica', 16)
+        c.drawString((page_width - subtitle_width) / 2, page_height - 83 * mm, subtitle)
         
-        # Student name
+        # Decorative element already drawn by _draw_decorative_border
+        
+        # "This is to certify that" text
+        c.setFillColor(CertificateService.COLORS['text_medium'])
+        c.setFont('Helvetica', 12)
+        certify_text = "This is to certify that"
+        certify_width = c.stringWidth(certify_text, 'Helvetica', 12)
+        c.drawString((page_width - certify_width) / 2, page_height - 105 * mm, certify_text)
+        
+        # Student name - prominent display
         student_name = f"{certificate.user.first_name} {certificate.user.last_name}".strip()
         if not student_name:
             student_name = certificate.user.email
-        content.append(Paragraph(student_name, name_style))
-        content.append(Spacer(1, 0.3 * inch))
         
-        # Course completion text
-        content.append(Paragraph("has successfully completed the course", body_style))
-        content.append(Spacer(1, 0.2 * inch))
+        c.setFillColor(CertificateService.COLORS['accent'])
+        c.setFont('Helvetica-Bold', 28)
+        name_width = c.stringWidth(student_name, 'Helvetica-Bold', 28)
+        c.drawString((page_width - name_width) / 2, page_height - 122 * mm, student_name)
+        
+        # Decorative line under name
+        line_y = page_height - 128 * mm
+        name_line_width = max(name_width + 40, 150 * mm)
+        c.setStrokeColor(CertificateService.COLORS['secondary'])
+        c.setLineWidth(1)
+        c.line((page_width - name_line_width) / 2, line_y, (page_width + name_line_width) / 2, line_y)
+        
+        # "has successfully completed" text
+        c.setFillColor(CertificateService.COLORS['text_medium'])
+        c.setFont('Helvetica', 12)
+        completed_text = "has successfully completed the course"
+        completed_width = c.stringWidth(completed_text, 'Helvetica', 12)
+        c.drawString((page_width - completed_width) / 2, page_height - 142 * mm, completed_text)
         
         # Course title
-        course_title_style = ParagraphStyle(
-            'CourseTitle',
-            parent=styles['Heading2'],
-            fontSize=20,
-            textColor=colors.HexColor('#1f2937'),
-            alignment=TA_CENTER,
-            spaceAfter=30,
-            fontName='Helvetica-Bold',
-        )
-        content.append(Paragraph(certificate.course.title, course_title_style))
-        content.append(Spacer(1, 0.5 * inch))
+        course_title = certificate.course.title
+        c.setFillColor(CertificateService.COLORS['text_dark'])
+        c.setFont('Helvetica-Bold', 20)
+        course_width = c.stringWidth(course_title, 'Helvetica-Bold', 20)
+        c.drawString((page_width - course_width) / 2, page_height - 158 * mm, course_title)
         
-        # Date and verification info
+        # Bottom section with date, verification, and seal
+        bottom_y = 45 * mm
+        
+        # Date section (left)
         issued_date = certificate.issued_at.strftime("%B %d, %Y")
+        c.setFillColor(CertificateService.COLORS['text_light'])
+        c.setFont('Helvetica', 10)
+        date_label = "Date of Issue"
+        c.drawString(80 * mm, bottom_y + 15, date_label)
         
-        # Create a table for the bottom info
-        table_data = [
-            ["Date of Completion:", "Verification Code:"],
-            [issued_date, str(certificate.verification_code)[:8].upper()]
-        ]
+        c.setFillColor(CertificateService.COLORS['text_dark'])
+        c.setFont('Helvetica-Bold', 12)
+        c.drawString(80 * mm, bottom_y, issued_date)
         
-        table = Table(table_data, colWidths=[3*inch, 3*inch])
-        table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (-1, 1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 12),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#4b5563')),
-            ('TOPPADDING', (0, 0), (-1, -1), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ]))
+        # Signature line (center-left)
+        CertificateService._draw_signature_line(c, 140 * mm, bottom_y + 8, 60 * mm, "Authorized Signature")
         
-        content.append(table)
-        content.append(Spacer(1, 0.5 * inch))
+        # Seal (center-right)
+        seal_x = page_width - 120 * mm
+        CertificateService._draw_seal(c, seal_x, bottom_y + 10, 18 * mm)
         
-        # Footer
-        footer_style = ParagraphStyle(
-            'Footer',
-            parent=styles['Normal'],
-            fontSize=10,
-            textColor=colors.HexColor('#6b7280'),
-            alignment=TA_CENTER,
-        )
-        content.append(Paragraph(f"Issued by {certificate.course.tenant.name if certificate.course.tenant else 'Learning Management System'}", footer_style))
+        # Verification code section (right)
+        c.setFillColor(CertificateService.COLORS['text_light'])
+        c.setFont('Helvetica', 10)
+        verify_label = "Verification Code"
+        c.drawString(page_width - 80 * mm, bottom_y + 15, verify_label)
         
-        # Build the PDF
-        doc.build(content)
+        c.setFillColor(CertificateService.COLORS['text_dark'])
+        c.setFont('Helvetica-Bold', 11)
+        verify_code = str(certificate.verification_code)[:8].upper()
+        c.drawString(page_width - 80 * mm, bottom_y, verify_code)
+        
+        # Certificate ID at very bottom
+        c.setFillColor(CertificateService.COLORS['text_light'])
+        c.setFont('Helvetica', 8)
+        cert_id = f"Certificate ID: {certificate.id}"
+        cert_id_width = c.stringWidth(cert_id, 'Helvetica', 8)
+        c.drawString((page_width - cert_id_width) / 2, 20 * mm, cert_id)
+        
+        # Save the PDF
+        c.save()
         buffer.seek(0)
         
         # Save the PDF file

@@ -148,10 +148,8 @@ class LearnerGroup(TimestampedModel):
         User,
         through="GroupMembership",
         related_name="learner_groups",
-        # Limit choices to users within the same tenant
-        limit_choices_to={
-            "tenant": models.F("tenant")
-        },  # Requires adjusting if tenant is nullable
+        # Note: Tenant filtering for members must be enforced at the form/admin/serializer
+        # level since limit_choices_to cannot reference the current instance's tenant.
     )
 
     def __str__(self):
@@ -176,6 +174,19 @@ class GroupMembership(TimestampedModel):
 
     def __str__(self):
         return f"{self.user.email} in {self.group.name}"
+
+    def clean(self):
+        """Validate that user belongs to the same tenant as the group."""
+        from django.core.exceptions import ValidationError
+        if self.user_id and self.group_id:
+            if self.user.tenant_id != self.group.tenant_id:
+                raise ValidationError(
+                    {"user": _("User must belong to the same tenant as the group.")}
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     class Meta:
         unique_together = ("user", "group")

@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from .models import LearnerGroup, GroupMembership, Tenant
 from .serializers import UserSerializer, UserCreateSerializer, LearnerGroupSerializer, GroupMembershipSerializer
-from .permissions import IsAdminOrTenantAdmin
+from .permissions import IsAdminOrTenantAdmin, IsAdmin, is_admin_user
 from apps.common.permissions import IsOwnerOrAdmin # Or specific permission
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
@@ -18,7 +18,7 @@ class UserViewSet(viewsets.ModelViewSet):
     API endpoint for Admins (Superuser or Tenant Admin) to manage users.
     """
     serializer_class = UserSerializer
-    permission_classes = [permissions.IsAdminUser] # Base check: only Django Admin/Staff
+    permission_classes = [IsAdmin] # Base check: Admin role, is_superuser, or is_staff
     # Add object permissions later if needed for more granular control
 
     def get_serializer_class(self):
@@ -32,8 +32,8 @@ class UserViewSet(viewsets.ModelViewSet):
             return User.objects.none()
 
         user = self.request.user
-        # Check if user is authenticated and staff (IsAdminUser permission handles this partially)
-        if not (user and user.is_authenticated and user.is_staff):
+        # Check if user is authenticated and admin (IsAdmin permission handles this partially)
+        if not (user and user.is_authenticated and is_admin_user(user)):
              return User.objects.none() # Should not be reached if permissions are correct
 
         if user.is_superuser:
@@ -46,19 +46,21 @@ class UserViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Logic moved from previous example, slightly refactored
         tenant = None
-        if self.request.user.is_superuser:
+        user = self.request.user
+        
+        if user.is_superuser:
             tenant_id = serializer.validated_data.get('tenant').id # Get tenant instance from validated data
             if not tenant_id:
                  # Should be caught by serializer required=True
                  raise serializers.ValidationError({"tenant": "Tenant must be specified by superuser."})
             # Serializer already validated the tenant exists
             tenant = serializer.validated_data.get('tenant')
-        elif self.request.user.is_staff and hasattr(self.request.user, 'tenant') and self.request.user.tenant: # Tenant Admin
+        elif is_admin_user(user) and hasattr(user, 'tenant') and user.tenant: # Tenant Admin
              # Ensure tenant in data matches admin's tenant
              data_tenant = serializer.validated_data.get('tenant')
-             if data_tenant != self.request.user.tenant:
+             if data_tenant and data_tenant != user.tenant:
                  raise serializers.ValidationError({"tenant": "Tenant Admins can only create users within their own tenant."})
-             tenant = self.request.user.tenant
+             tenant = user.tenant
         else:
              # Should not happen due to permission checks
              from rest_framework.exceptions import PermissionDenied

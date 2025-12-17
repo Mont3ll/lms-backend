@@ -6,6 +6,25 @@ from .models import UserProfile, LearnerGroup, GroupMembership, Tenant # Import 
 
 User = get_user_model()
 
+
+class UserBasicSerializer(serializers.ModelSerializer):
+    """Lightweight user serializer for nested representations."""
+    
+    full_name = serializers.CharField(read_only=True)
+    avatar_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'first_name', 'last_name', 'full_name', 'role', 'avatar_url')
+        read_only_fields = fields
+    
+    def get_avatar_url(self, obj) -> str | None:
+        """Get avatar URL from user profile if available."""
+        if hasattr(obj, 'profile') and obj.profile and obj.profile.avatar:
+            return obj.profile.avatar.url
+        return None
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
@@ -16,16 +35,17 @@ class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(required=False, allow_null=True) # Allow null profile initially
     # REMOVED redundant source='full_name'
     full_name = serializers.CharField(read_only=True) # Property defined on User model
+    tenant_slug = serializers.CharField(source='tenant.slug', read_only=True, allow_null=True)
 
     class Meta:
         model = User
         fields = (
             'id', 'email', 'first_name', 'last_name', 'full_name',
-            'role', 'status', 'profile', 'tenant',
+            'role', 'status', 'profile', 'tenant', 'tenant_slug',
             'is_active', 'is_staff', 'last_login', 'date_joined'
         )
         read_only_fields = (
-            'id', 'is_active', 'is_staff', 'last_login', 'date_joined', 'tenant', 'email' # Make email read-only after creation
+            'id', 'is_active', 'is_staff', 'last_login', 'date_joined', 'tenant', 'tenant_slug', 'email' # Make email read-only after creation
         )
         extra_kwargs = {
             # Removed email from here as it's now read_only
@@ -127,6 +147,60 @@ class ChangePasswordSerializer(serializers.Serializer):
         user.set_password(self.validated_data['new_password'])
         user.save(update_fields=['password', 'updated_at']) # Only update password and timestamp
         return user
+
+# --- Password Reset Serializers ---
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    """Serializer for requesting a password reset."""
+    email = serializers.EmailField(required=True)
+
+    def validate_email(self, value):
+        """Normalize the email and check if a user exists."""
+        # Always return success to prevent email enumeration attacks
+        # The actual check happens in the view
+        return value.lower()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Serializer for confirming a password reset."""
+    uid = serializers.CharField(required=True)
+    token = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'})
+    new_password2 = serializers.CharField(required=True, write_only=True, label="Confirm new password", style={'input_type': 'password'})
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['new_password2']:
+            raise serializers.ValidationError({"new_password2": "Password fields didn't match."})
+
+        # Decode uid and get user
+        from django.utils.http import urlsafe_base64_decode
+        from django.contrib.auth.tokens import default_token_generator
+
+        try:
+            uid = urlsafe_base64_decode(attrs['uid']).decode()
+            user = User.objects.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            raise serializers.ValidationError({"uid": "Invalid reset link."})
+
+        # Verify token
+        if not default_token_generator.check_token(user, attrs['token']):
+            raise serializers.ValidationError({"token": "Invalid or expired reset link."})
+
+        # Validate password strength
+        try:
+            validate_password(attrs['new_password'], user=user)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError({'new_password': list(e.messages)})
+
+        attrs['user'] = user
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.validated_data['user']
+        user.set_password(self.validated_data['new_password'])
+        user.save(update_fields=['password', 'updated_at'])
+        return user
+
 
 # --- Learner Group Serializers ---
 

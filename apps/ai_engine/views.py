@@ -2,6 +2,7 @@ import logging
 import uuid
 from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 
 from .models import GenerationJob, ModelConfig, PromptTemplate, GeneratedContent, Tenant # Import Tenant
@@ -9,9 +10,10 @@ from .serializers import (
     GenerationJobSerializer, GenerateContentSerializer, ModelConfigSerializer,
     PromptTemplateSerializer, GeneratedContentSerializer
 )
-from .services import ContentGeneratorService # Import service
+from .services import ContentGeneratorService, PersonalizationService # Import services
 from apps.users.permissions import IsAdminOrTenantAdmin
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from apps.common.permissions import IsOwnerOrAdmin
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 
 
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 class StartGenerationJobView(generics.GenericAPIView):
     """ Endpoint to initiate an AI content generation job. """
     serializer_class = GenerateContentSerializer
-    permission_classes = [permissions.IsAuthenticated] # TODO: Refine permission (e.g., check tenant feature flag)
+    permission_classes = [permissions.IsAuthenticated]  # Tenant feature flag checked in post()
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -38,7 +40,12 @@ class StartGenerationJobView(generics.GenericAPIView):
                 # Allow superuser if tenant_id is part of context? For now, require tenant.
                 return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # TODO: Check if AI features are enabled for this tenant via tenant.feature_flags
+            # Check if AI features are enabled for this tenant
+            if not tenant.feature_flags.get('ai_enabled', False):
+                return Response(
+                    {"detail": "AI features are not enabled for this tenant."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
             template = None
             model_config = None
@@ -141,9 +148,8 @@ class GeneratedContentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # Check if user owns the job associated with the content or is admin
         if self.action in ['partial_update']:
-            # Need object-level permission check (e.g., IsOwnerOrAdmin of the Job/Content)
-            # Simplified: Allow owner or tenant admin to update evaluation
-            return [permissions.IsAuthenticated()] # TODO: Add IsOwnerOrAdmin check
+            # Require owner or admin permission for updates
+            return [permissions.IsAuthenticated(), IsOwnerOrAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_update(self, serializer):
@@ -159,10 +165,9 @@ class GeneratedContentViewSet(viewsets.ModelViewSet):
         if not has_allowed_update:
              raise serializers.ValidationError("Only evaluation fields (is_accepted, rating, evaluation_feedback) can be updated.")
 
-        # Perform permission check before saving (e.g., is request.user owner or admin?)
-        instance = self.get_object() # Get instance before save
-        # if not (instance.user == self.request.user or self.request.user.is_staff):
-        #      raise PermissionDenied("You do not have permission to evaluate this content.")
+        # Perform permission check before saving (already checked by IsOwnerOrAdmin but double-check)
+        instance = self.get_object()
+        # Permission check is handled by IsOwnerOrAdmin in get_permissions()
 
         # Save only the allowed fields
         serializer.save(**update_data)
@@ -247,3 +252,348 @@ class PromptTemplateViewSet(viewsets.ModelViewSet):
              raise serializers.ValidationError({"default_model_config": "Default model config must belong to the same tenant."})
 
         serializer.save(tenant=save_tenant)
+
+
+# ============================================================================
+# Module Recommendation Views
+# ============================================================================
+
+@extend_schema(
+    tags=['AI Recommendations'],
+    summary="Get Module Recommendations",
+    description="""
+    Get personalized module recommendations for the authenticated user.
+    
+    The recommender considers:
+    - User's current skill proficiencies and gaps
+    - Module prerequisites (ensuring readiness)
+    - What similar learners have completed successfully
+    - Target skills the user wants to develop
+    
+    Query parameters allow customization of the recommendation algorithm weights
+    and filtering options.
+    """,
+    parameters=[
+        OpenApiParameter(
+            name='limit',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Number of recommendations to return (default: 10)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='course_id',
+            type=OpenApiTypes.UUID,
+            location=OpenApiParameter.QUERY,
+            description='Filter recommendations to a specific course',
+            required=False
+        ),
+        OpenApiParameter(
+            name='target_skills',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Comma-separated skill IDs to focus recommendations on',
+            required=False
+        ),
+        OpenApiParameter(
+            name='exclude_completed',
+            type=OpenApiTypes.BOOL,
+            location=OpenApiParameter.QUERY,
+            description='Whether to exclude completed modules (default: true)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='check_prerequisites',
+            type=OpenApiTypes.BOOL,
+            location=OpenApiParameter.QUERY,
+            description='Whether to filter by prerequisites (default: true)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='skill_weight',
+            type=OpenApiTypes.FLOAT,
+            location=OpenApiParameter.QUERY,
+            description='Weight for skill-based scoring 0-1 (default: 0.5)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='collaborative_weight',
+            type=OpenApiTypes.FLOAT,
+            location=OpenApiParameter.QUERY,
+            description='Weight for collaborative filtering 0-1 (default: 0.3)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='popularity_weight',
+            type=OpenApiTypes.FLOAT,
+            location=OpenApiParameter.QUERY,
+            description='Weight for popularity scoring 0-1 (default: 0.2)',
+            required=False
+        ),
+    ],
+    responses={
+        200: OpenApiResponse(
+            description='List of recommended modules',
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        'count': 3,
+                        'recommendations': [
+                            {
+                                'type': 'module',
+                                'id': '123e4567-e89b-12d3-a456-426614174000',
+                                'title': 'Introduction to Python',
+                                'score': 0.85,
+                                'reason': 'Addresses Python skill gap',
+                                'course_id': '123e4567-e89b-12d3-a456-426614174001',
+                                'course_title': 'Programming Fundamentals',
+                                'skills': ['Python', 'Programming Basics']
+                            }
+                        ]
+                    }
+                )
+            ]
+        ),
+        403: OpenApiTypes.OBJECT,
+    }
+)
+class ModuleRecommendationsView(APIView):
+    """
+    API endpoint for getting personalized module recommendations.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        
+        # Parse query parameters
+        try:
+            limit = int(request.query_params.get('limit', 10))
+            limit = min(max(limit, 1), 50)  # Clamp between 1 and 50
+        except ValueError:
+            limit = 10
+        
+        course_id = request.query_params.get('course_id')
+        target_skills_param = request.query_params.get('target_skills', '')
+        target_skills = [s.strip() for s in target_skills_param.split(',') if s.strip()] if target_skills_param else []
+        
+        exclude_completed = request.query_params.get('exclude_completed', 'true').lower() != 'false'
+        check_prerequisites = request.query_params.get('check_prerequisites', 'true').lower() != 'false'
+        
+        try:
+            skill_weight = float(request.query_params.get('skill_weight', 0.5))
+            skill_weight = min(max(skill_weight, 0), 1)
+        except ValueError:
+            skill_weight = 0.5
+        
+        try:
+            collaborative_weight = float(request.query_params.get('collaborative_weight', 0.3))
+            collaborative_weight = min(max(collaborative_weight, 0), 1)
+        except ValueError:
+            collaborative_weight = 0.3
+        
+        try:
+            popularity_weight = float(request.query_params.get('popularity_weight', 0.2))
+            popularity_weight = min(max(popularity_weight, 0), 1)
+        except ValueError:
+            popularity_weight = 0.2
+        
+        # Build context for the service
+        context = {
+            'limit': limit,
+            'course_id': course_id,
+            'target_skills': target_skills,
+            'exclude_completed': exclude_completed,
+            'check_prerequisites': check_prerequisites,
+            'skill_weight': skill_weight,
+            'collaborative_weight': collaborative_weight,
+            'popularity_weight': popularity_weight,
+        }
+        
+        # Get recommendations
+        recommendations = PersonalizationService.recommend_modules(user, context)
+        
+        return Response({
+            'count': len(recommendations),
+            'recommendations': recommendations
+        }, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    tags=['AI Recommendations'],
+    summary="Get Learning Sequence",
+    description="""
+    Generate an optimal learning sequence of modules for the authenticated user.
+    
+    Creates a structured learning path that:
+    - Respects module prerequisites (topological ordering)
+    - Prioritizes addressing the biggest skill gaps first
+    - Builds progressively from foundational to advanced content
+    
+    The response includes estimated skill gains from completing the sequence.
+    """,
+    parameters=[
+        OpenApiParameter(
+            name='course_id',
+            type=OpenApiTypes.UUID,
+            location=OpenApiParameter.QUERY,
+            description='Limit modules to a specific course',
+            required=False
+        ),
+        OpenApiParameter(
+            name='target_skills',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Comma-separated skill IDs to optimize the sequence for',
+            required=False
+        ),
+        OpenApiParameter(
+            name='max_modules',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Maximum modules in sequence (default: 10, max: 25)',
+            required=False
+        ),
+    ],
+    responses={
+        200: OpenApiResponse(
+            description='Ordered learning sequence',
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        'sequence': [
+                            {
+                                'position': 1,
+                                'module_id': '123e4567-e89b-12d3-a456-426614174000',
+                                'module_title': 'Introduction to Python',
+                                'course_id': '123e4567-e89b-12d3-a456-426614174001',
+                                'course_title': 'Programming Fundamentals',
+                                'score': 0.85,
+                                'reason': 'Foundation for later modules',
+                                'skills_developed': [
+                                    {'skill_name': 'Python', 'proficiency_gained': 15}
+                                ]
+                            }
+                        ],
+                        'total_modules': 5,
+                        'estimated_skill_gains': {'Python': 45, 'Data Analysis': 30},
+                        'skill_gap_analysis': [],
+                        'message': 'Learning sequence generated successfully'
+                    }
+                )
+            ]
+        ),
+        403: OpenApiTypes.OBJECT,
+    }
+)
+class ModuleSequenceView(APIView):
+    """
+    API endpoint for generating an optimal learning sequence of modules.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        
+        # Parse query parameters
+        course_id = request.query_params.get('course_id')
+        target_skills_param = request.query_params.get('target_skills', '')
+        target_skills = [s.strip() for s in target_skills_param.split(',') if s.strip()] if target_skills_param else None
+        
+        try:
+            max_modules = int(request.query_params.get('max_modules', 10))
+            max_modules = min(max(max_modules, 1), 25)  # Clamp between 1 and 25
+        except ValueError:
+            max_modules = 10
+        
+        # Generate the sequence
+        result = PersonalizationService.get_module_sequence(
+            user=user,
+            course_id=course_id,
+            target_skills=target_skills,
+            max_modules=max_modules
+        )
+        
+        return Response(result, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    tags=['AI Recommendations'],
+    summary="Get Skill Gap Analysis",
+    description="""
+    Analyze the user's skill gaps and get module recommendations to address them.
+    
+    Returns a detailed breakdown of:
+    - Current skill proficiency levels
+    - Target or expected proficiency levels
+    - Gap percentage for each skill
+    - Recommended modules to close each gap
+    
+    This is useful for understanding where the learner needs improvement and
+    building targeted learning plans.
+    """,
+    parameters=[
+        OpenApiParameter(
+            name='target_skills',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Comma-separated skill IDs to focus analysis on (optional - analyzes all gaps if not provided)',
+            required=False
+        ),
+    ],
+    responses={
+        200: OpenApiResponse(
+            description='Skill gap analysis with recommended modules',
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        'count': 3,
+                        'skill_gaps': [
+                            {
+                                'skill_id': '123e4567-e89b-12d3-a456-426614174000',
+                                'skill_name': 'Python',
+                                'current_proficiency': 25.0,
+                                'target_proficiency': 80.0,
+                                'gap_percentage': 55.0,
+                                'recommended_modules': [
+                                    {
+                                        'module_id': '123e4567-e89b-12d3-a456-426614174001',
+                                        'module_title': 'Advanced Python',
+                                        'proficiency_gain': 20.0
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                )
+            ]
+        ),
+        403: OpenApiTypes.OBJECT,
+    }
+)
+class SkillGapAnalysisView(APIView):
+    """
+    API endpoint for analyzing skill gaps and recommending modules to address them.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        
+        # Parse query parameters
+        target_skills_param = request.query_params.get('target_skills', '')
+        target_skills = [s.strip() for s in target_skills_param.split(',') if s.strip()] if target_skills_param else None
+        
+        # Get skill gap analysis
+        skill_gaps = PersonalizationService.get_module_skill_gap_analysis(
+            user=user,
+            target_skills=target_skills
+        )
+        
+        return Response({
+            'count': len(skill_gaps),
+            'skill_gaps': skill_gaps
+        }, status=status.HTTP_200_OK)

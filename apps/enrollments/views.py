@@ -3,6 +3,7 @@ import uuid
 from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import action
 from rest_framework.views import APIView
@@ -241,6 +242,20 @@ class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
         """Download certificate PDF with proper Content-Disposition header."""
         certificate = self.get_object()
         
+        # Generate PDF on-demand if it doesn't exist
+        if not certificate.file_url:
+            try:
+                from .certificate_service import CertificateService as PDFService
+                PDFService.generate_certificate_pdf(certificate)
+                certificate.refresh_from_db()  # Reload to get updated file_url
+                logger.info(f"Generated PDF on-demand for certificate {certificate.id}")
+            except Exception as e:
+                logger.error(f"Error generating PDF on-demand for certificate {certificate.id}: {e}")
+                return Response(
+                    {"error": "Failed to generate certificate PDF"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        
         if not certificate.file_url:
             return Response(
                 {"error": "Certificate PDF not available"}, 
@@ -253,18 +268,40 @@ class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
             from django.conf import settings
             import os
             
-            # Extract filename from file_url
+            # Extract filename from file_url and sanitize it
             filename = certificate.file_url.split('/')[-1]
+            # Remove any path traversal characters
+            filename = os.path.basename(filename)
+            
+            # Validate filename is not empty and doesn't contain dangerous characters
+            if not filename or '..' in filename or filename.startswith('/'):
+                logger.warning(f"Invalid certificate filename attempted: {certificate.file_url}")
+                return Response(
+                    {"error": "Invalid certificate file"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
             file_path = os.path.join(settings.MEDIA_ROOT, 'certificates', filename)
             
-            if os.path.exists(file_path):
+            # Resolve to absolute path and validate it's within MEDIA_ROOT
+            real_file_path = os.path.realpath(file_path)
+            media_root = os.path.realpath(settings.MEDIA_ROOT)
+            
+            if not real_file_path.startswith(media_root + os.sep):
+                logger.warning(f"Path traversal attempt detected: {certificate.file_url}")
+                return Response(
+                    {"error": "Invalid certificate file path"}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            if os.path.exists(real_file_path):
                 # Create a descriptive filename
                 safe_course_title = ''.join(c for c in certificate.course.title if c.isalnum() or c in (' ', '-', '_')).rstrip()
                 safe_course_title = safe_course_title.replace(' ', '-').lower()
                 download_filename = f"certificate-{safe_course_title}.pdf"
                 
                 response = FileResponse(
-                    open(file_path, 'rb'),
+                    open(real_file_path, 'rb'),
                     content_type='application/pdf',
                     as_attachment=True,
                     filename=download_filename
@@ -281,4 +318,108 @@ class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {"error": "Error downloading certificate"}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        description="Verify a certificate using its verification code",
+        parameters=[
+            OpenApiParameter(
+                name='verification_code',
+                description='Certificate verification code (UUID)',
+                required=True,
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH
+            )
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Certificate is valid",
+                examples=[
+                    OpenApiExample(
+                        'Valid Certificate',
+                        value={
+                            'valid': True,
+                            'learner_name': 'John Doe',
+                            'course_title': 'Introduction to Python',
+                            'issued_at': '2024-01-15T10:30:00Z',
+                            'status': 'ISSUED'
+                        }
+                    )
+                ]
+            ),
+            404: OpenApiResponse(
+                description="Certificate not found",
+                examples=[
+                    OpenApiExample(
+                        'Not Found',
+                        value={'valid': False, 'detail': 'Certificate not found'}
+                    )
+                ]
+            )
+        }
+    )
+    @action(
+        detail=False, 
+        methods=['get'], 
+        url_path='verify/(?P<verification_code>[^/.]+)',
+        permission_classes=[permissions.AllowAny]  # Anyone can verify a certificate
+    )
+    def verify(self, request, verification_code=None):
+        """
+        Verify a certificate using its unique verification code.
+        This endpoint is public and does not require authentication.
+        """
+        try:
+            # Try to parse as UUID
+            code_uuid = uuid.UUID(str(verification_code))
+            
+            # Look up the certificate
+            certificate = Certificate.objects.select_related('user', 'course').filter(
+                verification_code=code_uuid
+            ).first()
+            
+            if not certificate:
+                return Response(
+                    {'valid': False, 'detail': 'Certificate not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check if certificate is revoked
+            if certificate.status == Certificate.Status.REVOKED:
+                return Response({
+                    'valid': False,
+                    'detail': 'This certificate has been revoked',
+                    'learner_name': certificate.user.get_full_name() or certificate.user.email,
+                    'course_title': certificate.course.title,
+                    'issued_at': certificate.issued_at.isoformat() if certificate.issued_at else None,
+                    'status': certificate.status
+                })
+            
+            # Check if certificate is expired
+            if certificate.expires_at and certificate.expires_at < timezone.now():
+                return Response({
+                    'valid': False,
+                    'detail': 'This certificate has expired',
+                    'learner_name': certificate.user.get_full_name() or certificate.user.email,
+                    'course_title': certificate.course.title,
+                    'issued_at': certificate.issued_at.isoformat() if certificate.issued_at else None,
+                    'expires_at': certificate.expires_at.isoformat(),
+                    'status': certificate.status
+                })
+            
+            # Certificate is valid
+            return Response({
+                'valid': True,
+                'learner_name': certificate.user.get_full_name() or certificate.user.email,
+                'course_title': certificate.course.title,
+                'issued_at': certificate.issued_at.isoformat() if certificate.issued_at else None,
+                'expires_at': certificate.expires_at.isoformat() if certificate.expires_at else None,
+                'status': certificate.status,
+                'description': certificate.description or None
+            })
+            
+        except ValueError:
+            return Response(
+                {'valid': False, 'detail': 'Invalid verification code format'},
+                status=status.HTTP_400_BAD_REQUEST
             )

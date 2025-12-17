@@ -3,6 +3,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .views import (  # CustomTokenObtainPairView, # Use if customized; CustomTokenRefreshView,  # Use if customized
     ChangePasswordView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
     RegisterView,
     UserProfileView,
 )
@@ -23,8 +25,15 @@ urlpatterns = [
     path(
         "profile/change-password/", ChangePasswordView.as_view(), name="change_password"
     ),
-    # Add URLs for password reset, email verification etc. if using libraries like dj-rest-auth or implementing manually
-    # path('password/reset/', ...),
-    # path('password/reset/confirm/', ...),
-    # path('email/verify/', ...),
+    # Password Reset URLs
+    path(
+        "password/reset/",
+        PasswordResetRequestView.as_view(),
+        name="password_reset_request",
+    ),
+    path(
+        "password/reset/confirm/",
+        PasswordResetConfirmView.as_view(),
+        name="password_reset_confirm",
+    ),
 ]
