@@ -48,6 +48,8 @@ urlpatterns = [
                 path("ai/", include("apps.ai_engine.urls")),
                 path("notifications/", include("apps.notifications.urls")),
                 path("analytics/", include("apps.analytics.urls")),
+                path("discussions/", include("apps.discussions.urls")),
+                path("skills/", include("apps.skills.urls")),
 
                 # Learner-specific endpoints
                 path('learner/', include('apps.core.learner_api_urls')),
@@ -67,6 +69,7 @@ urlpatterns = [
                     # e.g., from apps.core if they are admin specific and not in the general 'core/' namespace
                     path('tenants/', include('apps.core.admin_api_urls')), # Tenant management endpoints
                     path('analytics/', include('apps.analytics.admin_api_urls')), # Analytics admin endpoints
+                    path('settings/', include('apps.core.settings_api_urls')), # Platform settings endpoints
                 ])),
             ]
         ),

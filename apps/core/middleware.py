@@ -11,10 +11,25 @@ logger = logging.getLogger(__name__)
 
 
 def get_tenant(request):
-    """Lazy function to get tenant"""
+    """Lazy function to get tenant.
+    
+    Supports tenant resolution via:
+    1. X-Tenant-Slug header (useful for testing and API clients)
+    2. Hostname-based lookup (production default)
+    """
     if not hasattr(request, "_cached_tenant"):
-        hostname = request.get_host().split(":")[0]
-        request._cached_tenant = TenantService.get_tenant_by_hostname(hostname)
+        # First, try X-Tenant-Slug header (useful for testing and API clients)
+        tenant_slug = request.META.get("HTTP_X_TENANT_SLUG")
+        if tenant_slug:
+            from .models import Tenant
+            try:
+                request._cached_tenant = Tenant.objects.get(slug=tenant_slug, is_active=True)
+            except Tenant.DoesNotExist:
+                request._cached_tenant = None
+        else:
+            # Fall back to hostname-based lookup
+            hostname = request.get_host().split(":")[0]
+            request._cached_tenant = TenantService.get_tenant_by_hostname(hostname)
     return request._cached_tenant
 
 

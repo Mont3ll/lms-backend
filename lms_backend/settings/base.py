@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     # Third Party Apps
     "rest_framework",
     "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "drf_spectacular",
     "storages",
@@ -62,6 +63,8 @@ INSTALLED_APPS = [
     "apps.ai_engine",
     "apps.notifications",
     "apps.analytics",
+    "apps.discussions",
+    "apps.skills",
 ]
 
 MIDDLEWARE = [
@@ -251,6 +254,18 @@ CORS_ALLOWED_ORIGINS = os.getenv(
 ).split(",")
 # Or use CORS_ALLOWED_ORIGIN_REGEXES
 CORS_ALLOW_CREDENTIALS = True  # If you need cookies/auth headers across origins
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "authorization",
+    "content-type",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+    "x-tenant-slug",  # Custom header for multi-tenant support
+]
+
+# Frontend URL for password reset links, email verification, etc.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 # Celery Configuration
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html
@@ -262,13 +277,16 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes task time limit (example)
-# Define Celery Beat schedule if needed (periodic tasks)
-# CELERY_BEAT_SCHEDULE = {
-#     'cleanup-task': {
-#         'task': 'apps.common.tasks.cleanup_old_data',
-#         'schedule': crontab(hour=0, minute=0), # Run daily at midnight
-#     },
-# }
+
+# Define Celery Beat schedule for periodic tasks
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    'send-deadline-reminders': {
+        'task': 'notifications.send_deadline_reminders',
+        'schedule': crontab(minute=0),  # Run every hour at minute 0
+    },
+}
 
 
 # Email Configuration
@@ -347,3 +365,26 @@ LOGGING = {
 # Tenant configuration (Placeholder - depends on library used, e.g., django-tenants)
 # MULTITENANCY_MODEL = 'core.Tenant'
 # MULTITENANCY_DOMAIN_MODEL = 'core.TenantDomain'
+
+# ClamAV Antivirus Scanning Configuration
+# https://www.clamav.net/documents/installing-clamav
+CLAMAV_ENABLED = os.getenv("CLAMAV_ENABLED", "False") == "True"
+CLAMAV_HOST = os.getenv("CLAMAV_HOST", "localhost")
+CLAMAV_PORT = int(os.getenv("CLAMAV_PORT", 3310))
+# Unix socket path (alternative to TCP connection)
+CLAMAV_SOCKET = os.getenv("CLAMAV_SOCKET", "/var/run/clamav/clamd.ctl")
+# Connection method: 'tcp' or 'socket'
+CLAMAV_CONNECTION_TYPE = os.getenv("CLAMAV_CONNECTION_TYPE", "tcp")
+# Maximum file size to scan (in bytes) - skip scanning for larger files
+CLAMAV_MAX_FILE_SIZE = int(os.getenv("CLAMAV_MAX_FILE_SIZE", 100 * 1024 * 1024))  # 100MB default
+
+# Twilio SMS Configuration
+# https://www.twilio.com/docs/sms/quickstart/python
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")  # e.g., "+15551234567"
+
+# Firebase Cloud Messaging (FCM) Configuration
+# https://firebase.google.com/docs/cloud-messaging
+FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY")
+FCM_PROJECT_ID = os.getenv("FCM_PROJECT_ID")

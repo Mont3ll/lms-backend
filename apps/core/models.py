@@ -184,6 +184,153 @@ class LTIResourceLink(TimestampedModel):
         return f"{self.lti_context_title or self.resource_link_id}"
 
 
+class LTILineItem(TimestampedModel):
+    """
+    Represents an LTI AGS (Assignment and Grade Services) line item.
+    Used for grade passback to LTI platforms.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    resource_link = models.ForeignKey(
+        LTIResourceLink,
+        on_delete=models.CASCADE,
+        related_name="line_items",
+        help_text="The resource link this line item belongs to",
+    )
+    # LTI line item identifier from the platform
+    line_item_id = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Line item ID/URL from the LTI platform",
+    )
+    # Local reference to assessment (optional)
+    assessment = models.ForeignKey(
+        "assessments.Assessment",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="lti_line_items",
+        help_text="Linked LMS assessment",
+    )
+    label = models.CharField(
+        max_length=255,
+        help_text="Display name for the line item",
+    )
+    score_maximum = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=100.00,
+        help_text="Maximum score for this line item",
+    )
+    tag = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional tag for categorizing line items",
+    )
+    resource_id = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Tool resource identifier",
+    )
+    # AGS endpoint URLs from the platform
+    ags_endpoint = models.URLField(
+        max_length=500,
+        blank=True,
+        help_text="AGS endpoint URL for this line item",
+    )
+
+    class Meta:
+        verbose_name = _("LTI Line Item")
+        verbose_name_plural = _("LTI Line Items")
+        unique_together = [["resource_link", "line_item_id"]]
+
+    def __str__(self):
+        return f"{self.label} ({self.resource_link})"
+
+
+class LTIGradeSubmission(TimestampedModel):
+    """
+    Tracks grade submissions to LTI platforms.
+    Used for auditing and retry logic.
+    """
+
+    class SubmissionStatus(models.TextChoices):
+        PENDING = "PENDING", _("Pending")
+        SUBMITTED = "SUBMITTED", _("Submitted")
+        FAILED = "FAILED", _("Failed")
+        RETRYING = "RETRYING", _("Retrying")
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    line_item = models.ForeignKey(
+        LTILineItem,
+        on_delete=models.CASCADE,
+        related_name="grade_submissions",
+        help_text="The line item this grade belongs to",
+    )
+    user = models.ForeignKey(
+        "users.User",
+        on_delete=models.CASCADE,
+        related_name="lti_grade_submissions",
+        help_text="The user this grade is for",
+    )
+    # LTI user identifier (sub claim)
+    lti_user_id = models.CharField(
+        max_length=255,
+        help_text="LTI user identifier (sub claim from launch)",
+    )
+    score = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Score achieved",
+    )
+    score_maximum = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Maximum possible score",
+    )
+    comment = models.TextField(
+        blank=True,
+        help_text="Optional comment/feedback",
+    )
+    activity_progress = models.CharField(
+        max_length=50,
+        default="Completed",
+        help_text="Activity progress (Initialized, Started, InProgress, Submitted, Completed)",
+    )
+    grading_progress = models.CharField(
+        max_length=50,
+        default="FullyGraded",
+        help_text="Grading progress (FullyGraded, Pending, PendingManual, Failed, NotReady)",
+    )
+    # Submission tracking
+    status = models.CharField(
+        max_length=20,
+        choices=SubmissionStatus.choices,
+        default=SubmissionStatus.PENDING,
+    )
+    submitted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the grade was successfully submitted to the platform",
+    )
+    error_message = models.TextField(
+        blank=True,
+        help_text="Error message if submission failed",
+    )
+    retry_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of retry attempts",
+    )
+
+    class Meta:
+        verbose_name = _("LTI Grade Submission")
+        verbose_name_plural = _("LTI Grade Submissions")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Grade for {self.user} on {self.line_item.label}: {self.score}/{self.score_maximum}"
+
+
 class SSOConfiguration(TimestampedModel):
     """
     Stores SSO (SAML/OAuth) configuration per tenant.
@@ -301,3 +448,142 @@ class SSOConfiguration(TimestampedModel):
                 pk=self.pk
             ).update(is_default=False)
         super().save(*args, **kwargs)
+
+
+class PlatformSettings(TimestampedModel):
+    """
+    Singleton model for storing platform-wide settings.
+    These settings can override environment variables when configured via admin UI.
+    Only one instance should exist per tenant (or globally if no tenant).
+    """
+
+    class StorageBackend(models.TextChoices):
+        LOCAL = "local", _("Local Filesystem")
+        S3 = "s3", _("Amazon S3 / S3-Compatible")
+        GCS = "gcs", _("Google Cloud Storage")
+        AZURE = "azure", _("Azure Blob Storage")
+
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="platform_settings",
+        null=True,
+        blank=True,
+        help_text="Tenant these settings belong to. Null for global/default settings.",
+    )
+
+    # General Settings
+    site_name = models.CharField(
+        max_length=100,
+        default="LMS Platform",
+        help_text="The name of the platform displayed to users",
+    )
+    site_description = models.TextField(
+        blank=True,
+        max_length=500,
+        help_text="A brief description of the platform",
+    )
+    default_language = models.CharField(
+        max_length=10,
+        default="en",
+        help_text="Default language code (e.g., en, es, fr)",
+    )
+    timezone = models.CharField(
+        max_length=50,
+        default="UTC",
+        help_text="Default timezone (e.g., UTC, America/New_York)",
+    )
+    support_email = models.EmailField(
+        blank=True,
+        help_text="Support contact email address",
+    )
+    terms_url = models.URLField(
+        blank=True,
+        help_text="URL to Terms of Service page",
+    )
+    privacy_url = models.URLField(
+        blank=True,
+        help_text="URL to Privacy Policy page",
+    )
+    logo_url = models.URLField(
+        blank=True,
+        help_text="URL to the platform logo image",
+    )
+    favicon_url = models.URLField(
+        blank=True,
+        help_text="URL to the platform favicon",
+    )
+
+    # Storage Settings
+    storage_backend = models.CharField(
+        max_length=20,
+        choices=StorageBackend.choices,
+        default=StorageBackend.LOCAL,
+        help_text="File storage backend type",
+    )
+    # S3 / S3-compatible storage settings
+    s3_bucket_name = models.CharField(max_length=255, blank=True)
+    s3_region = models.CharField(max_length=50, blank=True, default="us-east-1")
+    s3_access_key_id = models.CharField(max_length=255, blank=True)
+    s3_secret_access_key = models.CharField(max_length=255, blank=True)
+    s3_endpoint_url = models.URLField(blank=True, help_text="Custom endpoint for S3-compatible services")
+    s3_custom_domain = models.CharField(max_length=255, blank=True, help_text="CDN or custom domain")
+    # GCS settings
+    gcs_bucket_name = models.CharField(max_length=255, blank=True)
+    gcs_project_id = models.CharField(max_length=255, blank=True)
+    # Azure settings
+    azure_container_name = models.CharField(max_length=255, blank=True)
+    azure_account_name = models.CharField(max_length=255, blank=True)
+    azure_account_key = models.CharField(max_length=255, blank=True)
+    # General file settings
+    max_file_size_mb = models.PositiveIntegerField(
+        default=50,
+        help_text="Maximum file upload size in MB",
+    )
+    allowed_extensions = models.CharField(
+        max_length=500,
+        default="pdf,doc,docx,ppt,pptx,xls,xlsx,jpg,jpeg,png,gif,mp4,webm,mp3,zip",
+        help_text="Comma-separated list of allowed file extensions",
+    )
+
+    # Email Settings
+    smtp_host = models.CharField(max_length=255, blank=True)
+    smtp_port = models.PositiveIntegerField(default=587)
+    smtp_username = models.CharField(max_length=255, blank=True)
+    smtp_password = models.CharField(max_length=255, blank=True)
+    smtp_use_tls = models.BooleanField(default=True)
+    smtp_use_ssl = models.BooleanField(default=False)
+    default_from_email = models.EmailField(blank=True)
+    default_from_name = models.CharField(max_length=255, blank=True)
+    email_timeout = models.PositiveIntegerField(default=30, help_text="Email connection timeout in seconds")
+
+    class Meta:
+        verbose_name = _("Platform Settings")
+        verbose_name_plural = _("Platform Settings")
+
+    def __str__(self):
+        if self.tenant:
+            return f"Settings for {self.tenant.name}"
+        return "Global Platform Settings"
+
+    def save(self, *args, **kwargs):
+        # Ensure only one settings instance per tenant (or one global)
+        if not self.pk:
+            existing = PlatformSettings.objects.filter(tenant=self.tenant).first()
+            if existing:
+                self.pk = existing.pk
+                self.id = existing.id
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls, tenant=None):
+        """
+        Get or create settings for the given tenant.
+        Falls back to global settings if tenant-specific don't exist.
+        """
+        if tenant:
+            settings, _ = cls.objects.get_or_create(tenant=tenant)
+            return settings
+        # Get or create global settings
+        settings, _ = cls.objects.get_or_create(tenant__isnull=True)
+        return settings
