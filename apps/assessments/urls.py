@@ -3,6 +3,11 @@ from rest_framework_nested import routers
 
 from .views import (
     AssessmentAttemptResultView,
+    AssessmentAttemptSkillBreakdownView,
+    MyAssessmentAttemptsView,
+    RemedialPathAvailabilityView,
+    RemedialRecommendationsView,
+    ResumeAssessmentAttemptView,
     StartAssessmentAttemptView,
     SubmitAssessmentAttemptView,
 )
@@ -25,6 +30,12 @@ assessments_router.register(
 urlpatterns = [
     path("", include(router.urls)),
     path("", include(assessments_router.urls)),
+    # My attempts (user's own attempts across all assessments)
+    path(
+        "my-attempts/",
+        MyAssessmentAttemptsView.as_view(),
+        name="my-assessment-attempts",
+    ),
     # Attempt specific URLs
     path(
         "<uuid:assessment_id>/start/",
@@ -37,8 +48,28 @@ urlpatterns = [
         name="assessment-attempt-submit",
     ),
     path(
+        "attempts/<uuid:attempt_id>/resume/",
+        ResumeAssessmentAttemptView.as_view(),
+        name="assessment-attempt-resume",
+    ),
+    path(
         "attempts/<uuid:id>/result/",
         AssessmentAttemptResultView.as_view(),
         name="assessment-attempt-result",
     ),  # Use 'id' to match lookup_field
+    path(
+        "attempts/<uuid:attempt_id>/skill-breakdown/",
+        AssessmentAttemptSkillBreakdownView.as_view(),
+        name="assessment-attempt-skill-breakdown",
+    ),
+    path(
+        "attempts/<uuid:attempt_id>/remedial-path-availability/",
+        RemedialPathAvailabilityView.as_view(),
+        name="remedial-path-availability",
+    ),
+    path(
+        "recommendations/remedial/",
+        RemedialRecommendationsView.as_view(),
+        name="remedial-recommendations",
+    ),
 ]

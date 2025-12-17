@@ -158,36 +158,78 @@ class GradingService:
 
     @classmethod
     def _grade_true_false(cls, question: Question, user_answer) -> Decimal:
-        # Assumes TF stores options like MC, or stores correct answer directly
-        # Example: type_specific_data = {'correct_answer': True}
-        # Example: user_answer could be True, False, 'true', 'false', or option ID
-        correct_answer = question.type_specific_data.get("correct_answer")
-        if correct_answer is None:  # Try options format
-            correct_option_ids = cls._get_correct_options(question)
-            # Need a mapping from option ID to True/False value based on option text or stored value
-            # This structure needs standardization. Assume simple True/False for now.
-            logger.warning(
-                f"Cannot grade TF question {question.id} without clear correct answer structure."
-            )
+        """
+        Grades True/False questions.
+        
+        Supports two data formats:
+        1. Direct boolean: type_specific_data = {'correct_answer': True/False}
+           user_answer can be: True, False, 'true', 'false', 'True', 'False'
+        
+        2. Options format (like MC): type_specific_data = {'options': [
+               {'id': 'opt_true', 'text': 'True', 'value': True, 'is_correct': True},
+               {'id': 'opt_false', 'text': 'False', 'value': False, 'is_correct': False}
+           ]}
+           user_answer can be: option ID string or list with single option ID
+        """
+        points = Decimal(question.points)
+        type_data = question.type_specific_data or {}
+        
+        # Format 1: Direct boolean correct_answer
+        if "correct_answer" in type_data:
+            correct_answer = type_data["correct_answer"]
+            
+            # Normalize user answer to boolean
+            if isinstance(user_answer, str):
+                user_answer_bool = user_answer.lower() == "true"
+            elif isinstance(user_answer, bool):
+                user_answer_bool = user_answer
+            elif isinstance(user_answer, list) and len(user_answer) == 1:
+                # Single item list - extract and convert
+                item = user_answer[0]
+                if isinstance(item, str):
+                    user_answer_bool = item.lower() == "true"
+                else:
+                    user_answer_bool = bool(item)
+            else:
+                user_answer_bool = bool(user_answer)
+            
+            return points if user_answer_bool == correct_answer else Decimal(0)
+        
+        # Format 2: Options format (similar to multiple choice)
+        options = type_data.get("options", [])
+        if options:
+            # Build mapping of option ID to its correctness and value
+            correct_option_ids = set()
+            option_values = {}  # Maps option ID to its boolean value
+            
+            for opt in options:
+                opt_id = opt.get("id")
+                if opt.get("is_correct"):
+                    correct_option_ids.add(opt_id)
+                # Store the boolean value associated with this option
+                if "value" in opt:
+                    option_values[opt_id] = opt["value"]
+                elif opt.get("text", "").lower() == "true":
+                    option_values[opt_id] = True
+                elif opt.get("text", "").lower() == "false":
+                    option_values[opt_id] = False
+            
+            # Normalize user answer to option ID
+            if isinstance(user_answer, list):
+                user_selected_id = user_answer[0] if user_answer else None
+            else:
+                user_selected_id = user_answer
+            
+            # Check if user selected the correct option
+            if user_selected_id in correct_option_ids:
+                return points
+            
             return Decimal(0)
-
-        # Normalize user answer
-        if isinstance(user_answer, str):
-            user_answer_bool = user_answer.lower() == "true"
-        elif isinstance(user_answer, list):  # Came from option selection potentially
-            # Need logic to map selected option ID back to True/False
-            logger.warning(
-                f"Cannot grade TF question {question.id} from option ID list yet."
-            )
-            return Decimal(0)
-        else:
-            user_answer_bool = bool(user_answer)
-
-        return (
-            Decimal(question.points)
-            if user_answer_bool == correct_answer
-            else Decimal(0)
+        
+        logger.warning(
+            f"Cannot grade TF question {question.id}: no 'correct_answer' or 'options' in type_specific_data."
         )
+        return Decimal(0)
 
     @staticmethod
     def _grade_short_answer(question: Question, user_answer) -> Decimal:

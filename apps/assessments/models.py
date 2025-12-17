@@ -119,6 +119,15 @@ class Question(TimestampedModel):
     feedback = models.TextField(
         blank=True, help_text="General feedback displayed after answering (optional)"
     )
+    
+    # Skills this question evaluates (through table in skills app)
+    skills = models.ManyToManyField(
+        'skills.Skill',
+        through='skills.AssessmentSkillMapping',
+        related_name='questions',
+        blank=True,
+        help_text="Skills evaluated by this question"
+    )
 
     def __str__(self):
         return f"{self.question_type}: {self.question_text[:50]}... (Assessment: {self.assessment.title})"
