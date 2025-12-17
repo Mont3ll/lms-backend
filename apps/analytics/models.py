@@ -457,16 +457,36 @@ class Report(TimestampedModel):
 class Dashboard(TimestampedModel):
     """Represents a dashboard containing multiple report widgets/visualizations."""
 
+    class TimeRange(models.TextChoices):
+        LAST_7_DAYS = "7d", _("Last 7 Days")
+        LAST_30_DAYS = "30d", _("Last 30 Days")
+        LAST_90_DAYS = "90d", _("Last 90 Days")
+        LAST_YEAR = "1y", _("Last Year")
+        ALL_TIME = "all", _("All Time")
+        CUSTOM = "custom", _("Custom Range")
+
     tenant = models.ForeignKey(
         Tenant, on_delete=models.CASCADE, related_name="dashboards"
+    )
+    owner = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="owned_dashboards"
     )
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=100, unique=True)
     description = models.TextField(blank=True)
     # Configuration defining layout and widgets (which reports, chart types)
     layout_config = models.JSONField(blank=True, null=True)
-    # Define access control? (e.g., roles that can view this dashboard)
-    # allowed_roles = models.JSONField(default=list, blank=True)
+    
+    # Dashboard settings
+    is_default = models.BooleanField(default=False, help_text=_("Show this dashboard by default"))
+    is_shared = models.BooleanField(default=False, help_text=_("Make this dashboard visible to other users"))
+    allowed_roles = models.JSONField(default=list, blank=True, help_text=_("Roles that can view this dashboard"))
+    refresh_interval = models.PositiveIntegerField(
+        default=0, help_text=_("Auto-refresh interval in seconds (0 = disabled)")
+    )
+    default_time_range = models.CharField(
+        max_length=10, choices=TimeRange.choices, default=TimeRange.LAST_30_DAYS
+    )
 
     def __str__(self):
         return f"{self.name} ({self.tenant.name})"
@@ -476,6 +496,63 @@ class Dashboard(TimestampedModel):
         ordering = ["tenant__name", "name"]
         verbose_name = _("Dashboard Definition")
         verbose_name_plural = _("Dashboard Definitions")
+
+
+class DashboardWidget(TimestampedModel):
+    """Represents a widget/visualization within a dashboard."""
+
+    class WidgetType(models.TextChoices):
+        STAT_CARD = "stat_card", _("Stat Card")
+        LINE_CHART = "line_chart", _("Line Chart")
+        BAR_CHART = "bar_chart", _("Bar Chart")
+        PIE_CHART = "pie_chart", _("Pie Chart")
+        AREA_CHART = "area_chart", _("Area Chart")
+        TABLE = "table", _("Table")
+        PROGRESS_RING = "progress_ring", _("Progress Ring")
+        LEADERBOARD = "leaderboard", _("Leaderboard")
+
+    class DataSource(models.TextChoices):
+        USER_GROWTH = "user_growth", _("User Growth")
+        ENROLLMENT_STATS = "enrollment_stats", _("Enrollment Statistics")
+        COURSE_METRICS = "course_metrics", _("Course Metrics")
+        COMPLETION_RATES = "completion_rates", _("Completion Rates")
+        LOGIN_FREQUENCY = "login_frequency", _("Login Frequency")
+        PEAK_USAGE = "peak_usage", _("Peak Usage Hours")
+        TENANT_COMPARISON = "tenant_comparison", _("Tenant Comparison")
+        DEVICE_USAGE = "device_usage", _("Device Usage")
+        GEOGRAPHIC_DATA = "geographic_data", _("Geographic Data")
+        EVENTS_BY_TYPE = "events_by_type", _("Events by Type")
+        POPULAR_COURSES = "popular_courses", _("Popular Courses")
+        ACTIVE_USERS = "active_users", _("Active Users")
+        RECENT_ACTIVITY = "recent_activity", _("Recent Activity")
+
+    dashboard = models.ForeignKey(
+        Dashboard, on_delete=models.CASCADE, related_name="widgets"
+    )
+    widget_type = models.CharField(max_length=20, choices=WidgetType.choices)
+    title = models.CharField(max_length=255)
+    data_source = models.CharField(max_length=50, choices=DataSource.choices)
+    
+    # Widget-specific configuration (chart colors, axis labels, filters, etc.)
+    config = models.JSONField(default=dict, blank=True)
+    
+    # Grid position (for drag-and-drop layout)
+    # Using react-grid-layout format: x, y, w, h
+    position_x = models.PositiveIntegerField(default=0)
+    position_y = models.PositiveIntegerField(default=0)
+    width = models.PositiveIntegerField(default=4, help_text=_("Grid width (1-12)"))
+    height = models.PositiveIntegerField(default=3, help_text=_("Grid height (1-12)"))
+    
+    # Display order for widgets at the same position
+    order = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.title} ({self.get_widget_type_display()})"
+
+    class Meta:
+        ordering = ["dashboard", "order", "position_y", "position_x"]
+        verbose_name = _("Dashboard Widget")
+        verbose_name_plural = _("Dashboard Widgets")
 
 
 # Metric model might be too granular. Often metrics are calculated dynamically from events.

@@ -9,7 +9,7 @@ import uuid
 from django.db import models
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import Paginator
-from django.db.models import Avg, Count, Max, Min, Sum, Q, F, Case, When, IntegerField
+from django.db.models import Avg, Count, Max, Min, Sum, Q, F, Case, When, IntegerField, Value
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import random
@@ -330,7 +330,7 @@ class AnalyticsService:
         if date is None:
             date = timezone.now().date() - timedelta(days=1)
         
-        courses = Course.objects.filter(tenant=tenant, status='published')
+        courses = Course.objects.filter(tenant=tenant, status=Course.Status.PUBLISHED)
         
         for course in courses:
             # Get enrollment metrics
@@ -345,7 +345,7 @@ class AnalyticsService:
             ).count()
             dropped_enrollments = Enrollment.objects.filter(
                 course=course, 
-                status=Enrollment.Status.DROPPED
+                status=Enrollment.Status.CANCELLED
             ).count()
             
             # Calculate completion rate
@@ -409,7 +409,7 @@ class AnalyticsService:
         # Get all instructors in the tenant
         instructors = User.objects.filter(
             role='instructor',
-            courses__tenant=tenant
+            courses_authored__tenant=tenant
         ).distinct()
         
         for instructor in instructors:
@@ -417,8 +417,8 @@ class AnalyticsService:
             courses = Course.objects.filter(instructor=instructor, tenant=tenant)
             
             total_courses = courses.count()
-            published_courses = courses.filter(status='published').count()
-            draft_courses = courses.filter(status='draft').count()
+            published_courses = courses.filter(status=Course.Status.PUBLISHED).count()
+            draft_courses = courses.filter(status=Course.Status.DRAFT).count()
             
             # Get student metrics
             total_students = Enrollment.objects.filter(
@@ -831,6 +831,12 @@ class ReportGeneratorService:
                 data = ReportGeneratorService._generate_ai_recommendations_report(tenant, filters)
             elif slug == "real-time-metrics":
                 data = ReportGeneratorService._generate_real_time_metrics_report(tenant, filters)
+            elif slug == "engagement-metrics":
+                data = ReportGeneratorService._generate_engagement_metrics_report(tenant, filters)
+            elif slug == "course-analytics":
+                data = ReportGeneratorService._generate_course_analytics_report(tenant, filters)
+            elif slug == "student-performance":
+                data = ReportGeneratorService._generate_student_performance_report(tenant, filters)
             else:
                 raise ReportGenerationError(
                     f"Report generator not found for slug: {slug}"
@@ -872,7 +878,7 @@ class ReportGeneratorService:
         if start_date_str:
             try:
                 # Assume YYYY-MM-DD format
-                start_date = tz.localize(datetime.strptime(start_date_str, "%Y-%m-%d"))
+                start_date = timezone.make_aware(datetime.strptime(start_date_str, "%Y-%m-%d"), tz)
                 date_filter_gte = {f"{date_field}__gte": start_date}
                 queryset = queryset.filter(**date_filter_gte)
             except (ValueError, TypeError):
@@ -885,8 +891,8 @@ class ReportGeneratorService:
         if end_date_str:
             try:
                 # End date usually means up to the end of that day
-                end_date = tz.localize(
-                    datetime.strptime(end_date_str, "%Y-%m-%d")
+                end_date = timezone.make_aware(
+                    datetime.strptime(end_date_str, "%Y-%m-%d"), tz
                 ) + timedelta(days=1)
                 date_filter_lt = {f"{date_field}__lt": end_date}
                 queryset = queryset.filter(**date_filter_lt)
@@ -1160,37 +1166,72 @@ class ReportGeneratorService:
     def _generate_instructor_dashboard_report(
         tenant: Tenant | None, filters: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Generate comprehensive instructor dashboard data."""
-        instructor_id = filters.get("instructor_id")
-        if not instructor_id:
-            raise ReportGenerationError("instructor_id is required for instructor dashboard")
+        """Generate comprehensive instructor dashboard data.
         
-        # Get latest analytics
-        latest_analytics = InstructorAnalytics.objects.filter(
-            tenant=tenant,
-            instructor_id=instructor_id
-        ).order_by('-date').first()
+        If instructor_id is provided, returns data for that instructor.
+        If no instructor_id (admin view), returns aggregated data across all instructors.
+        """
+        instructor_id = filters.get("instructor_id") or filters.get("instructor")
+        
+        # Build base querysets
+        analytics_qs = InstructorAnalytics.objects.all()
+        ai_insights_qs = AIInsights.objects.all()
+        predictive_qs = PredictiveAnalytics.objects.all()
+        realtime_qs = RealTimeMetrics.objects.all()
+        
+        if tenant:
+            analytics_qs = analytics_qs.filter(tenant=tenant)
+            ai_insights_qs = ai_insights_qs.filter(tenant=tenant)
+            predictive_qs = predictive_qs.filter(tenant=tenant)
+            realtime_qs = realtime_qs.filter(tenant=tenant)
+        
+        if instructor_id:
+            # Specific instructor view
+            analytics_qs = analytics_qs.filter(instructor_id=instructor_id)
+            ai_insights_qs = ai_insights_qs.filter(instructor_id=instructor_id)
+            predictive_qs = predictive_qs.filter(instructor_id=instructor_id)
+            realtime_qs = realtime_qs.filter(instructor_id=instructor_id)
+        
+        # Get latest analytics (aggregate if admin, specific if instructor)
+        latest_analytics = analytics_qs.order_by('-date').first()
         
         if not latest_analytics:
-            return {"error": "No analytics data available"}
+            # Return empty structure instead of error for admin view
+            return {
+                "overview": {
+                    "total_courses": 0,
+                    "total_students": 0,
+                    "active_students": 0,
+                    "total_revenue": 0.0,
+                    "avg_completion_rate": 0.0,
+                    "avg_engagement_rate": 0.0
+                },
+                "ai_insights": {
+                    "key_insights": [],
+                    "recommendations": [],
+                    "confidence_score": 0
+                },
+                "predictive_analytics": {
+                    "students_at_risk": [],
+                    "revenue_forecast": [],
+                    "course_recommendations": []
+                },
+                "real_time": {
+                    "active_users": 0,
+                    "current_sessions": 0,
+                    "live_engagement_rate": 0.0,
+                    "server_health": 100.0
+                }
+            }
         
         # Get AI insights
-        ai_insights = AIInsights.objects.filter(
-            tenant=tenant,
-            instructor_id=instructor_id
-        ).order_by('-date').first()
+        ai_insights = ai_insights_qs.order_by('-date').first()
         
         # Get predictive analytics
-        predictive_analytics = PredictiveAnalytics.objects.filter(
-            tenant=tenant,
-            instructor_id=instructor_id
-        ).order_by('-prediction_date').first()
+        predictive_analytics = predictive_qs.order_by('-prediction_date').first()
         
         # Get real-time metrics
-        real_time_metrics = RealTimeMetrics.objects.filter(
-            tenant=tenant,
-            instructor_id=instructor_id
-        ).order_by('-timestamp').first()
+        real_time_metrics = realtime_qs.order_by('-timestamp').first()
         
         return {
             "overview": {
@@ -1219,7 +1260,350 @@ class ReportGeneratorService:
             }
         }
 
-    # ...existing methods...
+    @staticmethod
+    def _generate_engagement_metrics_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generates student engagement metrics data."""
+        # Apply instructor filter if provided
+        instructor_id = filters.get("instructor")
+        
+        # Base queryset for engagement metrics
+        engagement_qs = StudentEngagementMetric.objects.select_related("user")
+        if tenant:
+            engagement_qs = engagement_qs.filter(tenant=tenant)
+        
+        # Filter by instructor's courses if specified
+        if instructor_id:
+            instructor_course_ids = list(Course.objects.filter(
+                instructor_id=instructor_id
+            ).values_list('id', flat=True))
+            engagement_qs = engagement_qs.filter(course_id__in=instructor_course_ids)
+        
+        # Apply date filters
+        engagement_qs = ReportGeneratorService._apply_common_filters(
+            engagement_qs, filters, date_field="date"
+        )
+        
+        # Filter by specific course if provided
+        course_id = filters.get("course_id")
+        if course_id:
+            engagement_qs = engagement_qs.filter(course_id=course_id)
+        
+        # Aggregate engagement data
+        engagement_data = engagement_qs.values(
+            "user_id", "user__email", "user__first_name", "user__last_name", "course_id"
+        ).annotate(
+            total_active_time=Sum("daily_active_time"),
+            total_content_views=Sum("content_views"),
+            total_video_watches=Sum("video_watches"),
+            total_quiz_attempts=Sum("quiz_attempts"),
+            total_discussion_posts=Sum("discussion_posts"),
+            avg_risk_score=Avg("risk_score"),
+            last_activity=Max("last_activity_date"),
+        ).order_by("-total_active_time")
+        
+        # Get course titles
+        course_titles = {
+            str(c.id): c.title for c in Course.objects.filter(
+                id__in=engagement_qs.values_list("course_id", flat=True).distinct()
+            )
+        }
+        
+        report_data = []
+        for item in engagement_data:
+            report_data.append({
+                "user_id": str(item["user_id"]),
+                "user_email": item["user__email"],
+                "user_first_name": item["user__first_name"],
+                "user_last_name": item["user__last_name"],
+                "course_id": str(item["course_id"]),
+                "course_title": course_titles.get(str(item["course_id"]), "Unknown"),
+                "total_active_time_minutes": item["total_active_time"] or 0,
+                "total_content_views": item["total_content_views"] or 0,
+                "total_video_watches": item["total_video_watches"] or 0,
+                "total_quiz_attempts": item["total_quiz_attempts"] or 0,
+                "total_discussion_posts": item["total_discussion_posts"] or 0,
+                "avg_risk_score": float(item["avg_risk_score"]) if item["avg_risk_score"] else 0,
+                "last_activity": item["last_activity"].isoformat() if item["last_activity"] else None,
+            })
+        
+        return report_data
+
+    @staticmethod
+    def _generate_course_analytics_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generates course analytics overview data."""
+        # Apply instructor filter if provided
+        instructor_id = filters.get("instructor")
+        
+        # Base queryset for course analytics
+        analytics_qs = CourseAnalytics.objects.all()
+        if tenant:
+            analytics_qs = analytics_qs.filter(tenant=tenant)
+        
+        # Filter by instructor if specified
+        if instructor_id:
+            analytics_qs = analytics_qs.filter(instructor_id=instructor_id)
+        
+        # Apply date filters
+        analytics_qs = ReportGeneratorService._apply_common_filters(
+            analytics_qs, filters, date_field="date"
+        )
+        
+        # Filter by specific course if provided
+        course_id = filters.get("course_id")
+        if course_id:
+            analytics_qs = analytics_qs.filter(course_id=course_id)
+        
+        # Get the latest analytics per course
+        latest_dates = analytics_qs.values("course_id").annotate(
+            latest_date=Max("date")
+        )
+        
+        # Build report data from latest entries
+        report_data = []
+        for item in latest_dates:
+            latest_analytics = analytics_qs.filter(
+                course_id=item["course_id"],
+                date=item["latest_date"]
+            ).first()
+            
+            if latest_analytics:
+                # Get course title
+                course = Course.objects.filter(id=latest_analytics.course_id).first()
+                course_title = course.title if course else "Unknown"
+                
+                report_data.append({
+                    "course_id": str(latest_analytics.course_id),
+                    "course_title": course_title,
+                    "date": latest_analytics.date.isoformat(),
+                    "total_enrollments": latest_analytics.total_enrollments,
+                    "active_enrollments": latest_analytics.active_enrollments,
+                    "completed_enrollments": latest_analytics.completed_enrollments,
+                    "dropped_enrollments": latest_analytics.dropped_enrollments,
+                    "avg_completion_rate": float(latest_analytics.avg_completion_rate) if latest_analytics.avg_completion_rate else 0,
+                    "avg_engagement_score": float(latest_analytics.avg_engagement_score) if latest_analytics.avg_engagement_score else 0,
+                    "total_revenue": float(latest_analytics.total_revenue) if latest_analytics.total_revenue else 0,
+                    "avg_revenue_per_student": float(latest_analytics.avg_revenue_per_student) if latest_analytics.avg_revenue_per_student else 0,
+                })
+        
+        return sorted(report_data, key=lambda x: x["course_title"])
+
+    @staticmethod
+    def _generate_student_performance_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generates individual student performance data."""
+        # Apply instructor filter if provided
+        instructor_id = filters.get("instructor")
+        
+        # Base queryset for assessment attempts
+        attempts_qs = AssessmentAttempt.objects.filter(
+            status=AssessmentAttempt.AttemptStatus.GRADED
+        ).select_related("user", "assessment", "assessment__course")
+        
+        if tenant:
+            attempts_qs = attempts_qs.filter(assessment__course__tenant=tenant)
+        
+        # Filter by instructor's courses if specified
+        if instructor_id:
+            attempts_qs = attempts_qs.filter(assessment__course__instructor_id=instructor_id)
+        
+        # Apply date filters
+        attempts_qs = ReportGeneratorService._apply_common_filters(
+            attempts_qs, filters, date_field="end_time"
+        )
+        
+        # Filter by specific user or course if provided
+        user_id = filters.get("user_id")
+        course_id = filters.get("course_id")
+        if user_id:
+            attempts_qs = attempts_qs.filter(user_id=user_id)
+        if course_id:
+            attempts_qs = attempts_qs.filter(assessment__course_id=course_id)
+        
+        # Aggregate performance data per user per course
+        performance_data = attempts_qs.values(
+            "user_id", "user__email", "user__first_name", "user__last_name",
+            "assessment__course_id", "assessment__course__title"
+        ).annotate(
+            total_attempts=Count("id"),
+            passed_attempts=Count("id", filter=Q(is_passed=True)),
+            avg_score=Avg("score"),
+            max_score=Max("score"),
+            min_score=Min("score"),
+            last_attempt=Max("end_time"),
+        ).order_by("user__last_name", "user__first_name")
+        
+        report_data = []
+        for item in performance_data:
+            total = item["total_attempts"]
+            passed = item["passed_attempts"]
+            pass_rate = (passed / total * 100) if total > 0 else 0
+            
+            report_data.append({
+                "user_id": str(item["user_id"]),
+                "user_email": item["user__email"],
+                "user_first_name": item["user__first_name"],
+                "user_last_name": item["user__last_name"],
+                "course_id": str(item["assessment__course_id"]),
+                "course_title": item["assessment__course__title"],
+                "total_attempts": total,
+                "passed_attempts": passed,
+                "pass_rate": round(pass_rate, 2),
+                "avg_score": float(item["avg_score"]) if item["avg_score"] else 0,
+                "max_score": float(item["max_score"]) if item["max_score"] else 0,
+                "min_score": float(item["min_score"]) if item["min_score"] else 0,
+                "last_attempt": item["last_attempt"].isoformat() if item["last_attempt"] else None,
+            })
+        
+        return report_data
+
+    @staticmethod
+    def _generate_student_engagement_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generates student engagement report - alias for engagement-metrics."""
+        return ReportGeneratorService._generate_engagement_metrics_report(tenant, filters)
+
+    @staticmethod
+    def _generate_course_performance_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generates course performance report - similar to course analytics."""
+        return ReportGeneratorService._generate_course_analytics_report(tenant, filters)
+
+    @staticmethod
+    def _generate_predictive_insights_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generates predictive insights data."""
+        instructor_id = filters.get("instructor_id") or filters.get("instructor")
+        
+        if not instructor_id:
+            # Return empty structure if no instructor specified
+            return {
+                "students_at_risk": [],
+                "revenue_forecast": [],
+                "course_recommendations": [],
+                "prediction_confidence": 0
+            }
+        
+        # Get latest predictive analytics
+        predictive_qs = PredictiveAnalytics.objects.filter(
+            instructor_id=instructor_id
+        ).order_by("-prediction_date")
+        
+        if tenant:
+            predictive_qs = predictive_qs.filter(tenant=tenant)
+        
+        latest = predictive_qs.first()
+        
+        if not latest:
+            return {
+                "students_at_risk": [],
+                "revenue_forecast": [],
+                "course_recommendations": [],
+                "prediction_confidence": 0
+            }
+        
+        return {
+            "students_at_risk": latest.students_at_risk or [],
+            "revenue_forecast": latest.revenue_forecast or [],
+            "course_recommendations": latest.course_recommendations or [],
+            "prediction_confidence": float(latest.prediction_confidence) if latest.prediction_confidence else 0,
+            "prediction_date": latest.prediction_date.isoformat()
+        }
+
+    @staticmethod
+    def _generate_ai_recommendations_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generates AI recommendations data."""
+        instructor_id = filters.get("instructor_id") or filters.get("instructor")
+        
+        if not instructor_id:
+            return {
+                "key_insights": [],
+                "recommendations": [],
+                "anomalies": [],
+                "confidence_score": 0
+            }
+        
+        # Get latest AI insights
+        insights_qs = AIInsights.objects.filter(
+            instructor_id=instructor_id
+        ).order_by("-date")
+        
+        if tenant:
+            insights_qs = insights_qs.filter(tenant=tenant)
+        
+        latest = insights_qs.first()
+        
+        if not latest:
+            return {
+                "key_insights": [],
+                "recommendations": [],
+                "anomalies": [],
+                "confidence_score": 0
+            }
+        
+        return {
+            "key_insights": latest.key_insights or [],
+            "recommendations": latest.recommendations or [],
+            "anomalies": latest.anomalies or [],
+            "confidence_score": float(latest.confidence_score) if latest.confidence_score else 0,
+            "date": latest.date.isoformat()
+        }
+
+    @staticmethod
+    def _generate_real_time_metrics_report(
+        tenant: Tenant | None, filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generates real-time metrics data."""
+        instructor_id = filters.get("instructor_id") or filters.get("instructor")
+        
+        if not instructor_id:
+            return {
+                "active_users": 0,
+                "current_sessions": 0,
+                "live_engagement_rate": 0,
+                "server_health": 100,
+                "response_time": 0
+            }
+        
+        # Get latest real-time metrics
+        metrics_qs = RealTimeMetrics.objects.filter(
+            instructor_id=instructor_id
+        ).order_by("-timestamp")
+        
+        if tenant:
+            metrics_qs = metrics_qs.filter(tenant=tenant)
+        
+        latest = metrics_qs.first()
+        
+        if not latest:
+            return {
+                "active_users": 0,
+                "current_sessions": 0,
+                "live_engagement_rate": 0,
+                "server_health": 100,
+                "response_time": 0
+            }
+        
+        return {
+            "active_users": latest.active_users,
+            "current_sessions": latest.current_sessions,
+            "live_engagement_rate": float(latest.live_engagement_rate) if latest.live_engagement_rate else 0,
+            "server_health": float(latest.server_health) if latest.server_health else 100,
+            "response_time": latest.response_time,
+            "current_course_views": latest.current_course_views,
+            "current_video_watches": latest.current_video_watches,
+            "current_quiz_attempts": latest.current_quiz_attempts,
+            "timestamp": latest.timestamp.isoformat()
+        }
 
 
 class DataProcessorService:
@@ -1246,7 +1630,7 @@ class DataProcessorService:
             # Generate AI insights for all instructors
             instructors = User.objects.filter(
                 role='instructor',
-                courses__tenant=tenant
+                courses_authored__tenant=tenant
             ).distinct()
             
             for instructor in instructors:
@@ -1264,7 +1648,7 @@ class DataProcessorService:
         """Process real-time metrics for all instructors in a tenant."""
         instructors = User.objects.filter(
             role='instructor',
-            courses__tenant=tenant
+            courses_authored__tenant=tenant
         ).distinct()
         
         for instructor in instructors:
@@ -2511,6 +2895,497 @@ class ComprehensiveAnalyticsService:
                 risk_score += 30  # Poor performance
         
         return min(risk_score, 100)  # Cap at 100
+
+class LearnerInsightsService:
+    """
+    Service for generating personalized analytics and insights for individual learners.
+    
+    Provides data for learner dashboard insights including:
+    - Learning streaks and study habits
+    - Progress across all enrolled courses
+    - Assessment performance analytics
+    - Personalized recommendations based on learning patterns
+    - Time spent learning and engagement metrics
+    """
+
+    @staticmethod
+    def get_learner_insights(user: User, tenant: Optional[Tenant] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive learner insights for a user.
+        
+        Returns a dictionary containing:
+        - overview: Summary statistics (courses, progress, hours, streak)
+        - learning_activity: Recent activity and engagement patterns
+        - course_progress: Progress across all enrolled courses
+        - assessment_performance: Assessment scores and trends
+        - learning_patterns: Study habits and optimal times
+        - recommendations: Personalized suggestions
+        """
+        if not user:
+            raise ValueError("User is required")
+        
+        today = timezone.now().date()
+        
+        return {
+            "user_id": str(user.id),
+            "generated_at": timezone.now().isoformat(),
+            "overview": LearnerInsightsService._get_overview(user, tenant),
+            "learning_activity": LearnerInsightsService._get_learning_activity(user, tenant),
+            "course_progress": LearnerInsightsService._get_course_progress(user, tenant),
+            "assessment_performance": LearnerInsightsService._get_assessment_performance(user, tenant),
+            "learning_patterns": LearnerInsightsService._get_learning_patterns(user, tenant),
+            "recommendations": LearnerInsightsService._get_recommendations(user, tenant),
+        }
+
+    @staticmethod
+    def _get_overview(user: User, tenant: Optional[Tenant]) -> Dict[str, Any]:
+        """Get high-level overview statistics for the learner."""
+        # Get enrollment data
+        enrollments = Enrollment.objects.filter(
+            user=user,
+            status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+        )
+        if tenant:
+            enrollments = enrollments.filter(course__tenant=tenant)
+        
+        total_courses = enrollments.count()
+        completed_courses = enrollments.filter(status=Enrollment.Status.COMPLETED).count()
+        in_progress_courses = enrollments.filter(status=Enrollment.Status.ACTIVE).count()
+        
+        # Calculate overall progress percentage
+        total_progress = enrollments.aggregate(avg_progress=Avg('progress'))['avg_progress'] or 0
+        
+        # Calculate total learning hours from study sessions
+        today = timezone.now().date()
+        last_30_days = today - timedelta(days=30)
+        
+        study_sessions = StudySession.objects.filter(
+            user=user,
+            started_at__date__gte=last_30_days
+        )
+        if tenant:
+            study_sessions = study_sessions.filter(tenant=tenant)
+        
+        total_minutes = 0
+        for session in study_sessions.filter(duration__isnull=False):
+            total_minutes += session.duration.total_seconds() / 60
+        total_hours = round(total_minutes / 60, 1)
+        
+        # Calculate learning streak
+        streak = LearnerInsightsService._calculate_learning_streak(user, tenant)
+        
+        # Get certificates earned
+        from apps.enrollments.models import Certificate
+        certificates = Certificate.objects.filter(user=user, status=Certificate.Status.ISSUED)
+        if tenant:
+            certificates = certificates.filter(course__tenant=tenant)
+        certificates_count = certificates.count()
+        
+        return {
+            "total_courses_enrolled": total_courses,
+            "courses_completed": completed_courses,
+            "courses_in_progress": in_progress_courses,
+            "overall_progress_percentage": round(float(total_progress), 1),
+            "total_learning_hours": total_hours,
+            "current_streak_days": streak,
+            "certificates_earned": certificates_count,
+        }
+
+    @staticmethod
+    def _calculate_learning_streak(user: User, tenant: Optional[Tenant]) -> int:
+        """Calculate consecutive days with learning activity."""
+        today = timezone.now().date()
+        streak = 0
+        current_date = today
+        
+        # Check up to 365 days back
+        for _ in range(365):
+            # Check if there was any activity on this date
+            day_start = timezone.make_aware(datetime.combine(current_date, datetime.min.time()))
+            day_end = day_start + timedelta(days=1)
+            
+            activity_exists = Event.objects.filter(
+                user=user,
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            )
+            if tenant:
+                activity_exists = activity_exists.filter(tenant=tenant)
+            
+            if activity_exists.exists():
+                streak += 1
+                current_date -= timedelta(days=1)
+            else:
+                break
+        
+        return streak
+
+    @staticmethod
+    def _get_learning_activity(user: User, tenant: Optional[Tenant]) -> Dict[str, Any]:
+        """Get recent learning activity and engagement metrics."""
+        today = timezone.now().date()
+        last_7_days = today - timedelta(days=7)
+        last_30_days = today - timedelta(days=30)
+        
+        # Get daily activity for the last 7 days
+        daily_activity = []
+        for i in range(7):
+            date = today - timedelta(days=i)
+            day_start = timezone.make_aware(datetime.combine(date, datetime.min.time()))
+            day_end = day_start + timedelta(days=1)
+            
+            events = Event.objects.filter(
+                user=user,
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            )
+            if tenant:
+                events = events.filter(tenant=tenant)
+            
+            # Calculate time spent from study sessions
+            sessions = StudySession.objects.filter(
+                user=user,
+                started_at__date=date
+            )
+            if tenant:
+                sessions = sessions.filter(tenant=tenant)
+            
+            minutes_spent = 0
+            for session in sessions.filter(duration__isnull=False):
+                minutes_spent += session.duration.total_seconds() / 60
+            
+            daily_activity.append({
+                "date": date.isoformat(),
+                "minutes_spent": round(minutes_spent),
+                "activities_count": events.count(),
+            })
+        
+        # Reverse to have oldest first
+        daily_activity.reverse()
+        
+        # Get activity breakdown by type for last 30 days
+        events_30d = Event.objects.filter(
+            user=user,
+            created_at__date__gte=last_30_days
+        )
+        if tenant:
+            events_30d = events_30d.filter(tenant=tenant)
+        
+        content_views = events_30d.filter(event_type='CONTENT_VIEW').count()
+        video_watches = events_30d.filter(event_type__in=['VIDEO_WATCH', 'VIDEO_COMPLETE']).count()
+        quiz_attempts = events_30d.filter(event_type='QUIZ_ATTEMPT').count()
+        assessments_completed = events_30d.filter(event_type='ASSESSMENT_SUBMIT').count()
+        
+        return {
+            "daily_activity": daily_activity,
+            "activity_breakdown": {
+                "content_views": content_views,
+                "video_watches": video_watches,
+                "quiz_attempts": quiz_attempts,
+                "assessments_completed": assessments_completed,
+            },
+            "this_week_total_minutes": sum(d["minutes_spent"] for d in daily_activity),
+        }
+
+    @staticmethod
+    def _get_course_progress(user: User, tenant: Optional[Tenant]) -> List[Dict[str, Any]]:
+        """Get detailed progress for each enrolled course."""
+        enrollments = Enrollment.objects.filter(
+            user=user,
+            status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+        ).select_related('course', 'course__instructor')
+        
+        if tenant:
+            enrollments = enrollments.filter(course__tenant=tenant)
+        
+        course_progress = []
+        for enrollment in enrollments.order_by('-updated_at')[:10]:  # Latest 10 courses
+            course = enrollment.course
+            
+            # Get last activity date for this course
+            last_activity = Event.objects.filter(
+                user=user,
+                context_data__course_id=str(course.id)
+            ).order_by('-created_at').first()
+            
+            last_activity_date = None
+            if last_activity:
+                last_activity_date = last_activity.created_at.isoformat()
+            
+            # Get module completion status
+            from apps.enrollments.models import LearnerProgress
+            from apps.courses.models import ContentItem
+            
+            total_items = ContentItem.objects.filter(
+                module__course=course,
+                is_published=True,
+                is_required=True
+            ).count()
+            
+            completed_items = LearnerProgress.objects.filter(
+                enrollment=enrollment,
+                status=LearnerProgress.Status.COMPLETED
+            ).count()
+            
+            course_progress.append({
+                "course_id": str(course.id),
+                "course_slug": course.slug,
+                "course_title": course.title,
+                "instructor_name": course.instructor.get_full_name() if course.instructor else None,
+                "status": enrollment.status,
+                "progress_percentage": enrollment.progress or 0,
+                "items_completed": completed_items,
+                "total_items": total_items,
+                "enrolled_at": enrollment.enrolled_at.isoformat() if enrollment.enrolled_at else None,
+                "completed_at": enrollment.completed_at.isoformat() if enrollment.completed_at else None,
+                "last_activity": last_activity_date,
+            })
+        
+        return course_progress
+
+    @staticmethod
+    def _get_assessment_performance(user: User, tenant: Optional[Tenant]) -> Dict[str, Any]:
+        """Get assessment performance analytics."""
+        # Get all graded attempts
+        attempts = AssessmentAttempt.objects.filter(
+            user=user,
+            status=AssessmentAttempt.AttemptStatus.GRADED
+        ).select_related('assessment', 'assessment__course')
+        
+        if tenant:
+            attempts = attempts.filter(assessment__course__tenant=tenant)
+        
+        total_attempts = attempts.count()
+        passed_attempts = attempts.filter(is_passed=True).count()
+        
+        # Calculate averages
+        avg_score = attempts.aggregate(avg=Avg('score'))['avg'] or 0
+        
+        # Pass rate
+        pass_rate = (passed_attempts / total_attempts * 100) if total_attempts > 0 else 0
+        
+        # Get performance by assessment type
+        performance_by_type = attempts.values(
+            'assessment__assessment_type'
+        ).annotate(
+            avg_score=Avg('score'),
+            total=Count('id'),
+            passed=Count('id', filter=Q(is_passed=True))
+        )
+        
+        by_type = {}
+        for item in performance_by_type:
+            assessment_type = item['assessment__assessment_type']
+            by_type[assessment_type] = {
+                "average_score": round(float(item['avg_score'] or 0), 1),
+                "total_attempts": item['total'],
+                "passed": item['passed'],
+                "pass_rate": round((item['passed'] / item['total'] * 100) if item['total'] > 0 else 0, 1),
+            }
+        
+        # Get recent assessment results (last 5)
+        recent_attempts = attempts.order_by('-end_time')[:5]
+        recent_results = []
+        for attempt in recent_attempts:
+            recent_results.append({
+                "assessment_title": attempt.assessment.title,
+                "course_title": attempt.assessment.course.title,
+                "score": float(attempt.score) if attempt.score else 0,
+                "is_passed": attempt.is_passed,
+                "completed_at": attempt.end_time.isoformat() if attempt.end_time else None,
+            })
+        
+        # Score trend (last 10 attempts chronologically)
+        trend_attempts = attempts.order_by('end_time')[:10]
+        score_trend = [
+            {
+                "date": a.end_time.date().isoformat() if a.end_time else None,
+                "score": float(a.score) if a.score else 0
+            }
+            for a in trend_attempts
+        ]
+        
+        return {
+            "total_assessments_taken": total_attempts,
+            "assessments_passed": passed_attempts,
+            "average_score": round(float(avg_score), 1),
+            "pass_rate": round(pass_rate, 1),
+            "performance_by_type": by_type,
+            "recent_results": recent_results,
+            "score_trend": score_trend,
+        }
+
+    @staticmethod
+    def _get_learning_patterns(user: User, tenant: Optional[Tenant]) -> Dict[str, Any]:
+        """Analyze learning patterns and study habits."""
+        today = timezone.now().date()
+        last_30_days = today - timedelta(days=30)
+        
+        # Get study sessions from the last 30 days
+        sessions = StudySession.objects.filter(
+            user=user,
+            started_at__date__gte=last_30_days
+        )
+        if tenant:
+            sessions = sessions.filter(tenant=tenant)
+        
+        # Calculate optimal study times based on engagement scores
+        hourly_engagement = sessions.values('started_at__hour').annotate(
+            avg_engagement=Avg('engagement_score'),
+            session_count=Count('id')
+        ).order_by('-avg_engagement')
+        
+        optimal_hours = [
+            {"hour": item['started_at__hour'], "engagement_score": float(item['avg_engagement'] or 0)}
+            for item in hourly_engagement[:3]  # Top 3 hours
+        ]
+        
+        # Calculate preferred study days
+        daily_sessions = sessions.values('started_at__week_day').annotate(
+            session_count=Count('id'),
+            total_minutes=Sum(
+                Case(
+                    When(duration__isnull=False, then=F('duration')),
+                    default=Value(0),
+                    output_field=IntegerField()
+                )
+            )
+        ).order_by('-session_count')
+        
+        day_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+        preferred_days = []
+        for item in daily_sessions[:3]:  # Top 3 days
+            day_index = item['started_at__week_day'] - 1
+            if 0 <= day_index < 7:
+                preferred_days.append(day_names[day_index])
+        
+        # Calculate average session duration
+        avg_duration = sessions.filter(duration__isnull=False).aggregate(
+            avg_duration=Avg('duration')
+        )['avg_duration']
+        
+        avg_session_minutes = 0
+        if avg_duration:
+            avg_session_minutes = round(avg_duration.total_seconds() / 60)
+        
+        # Get device usage from events
+        events = Event.objects.filter(
+            user=user,
+            created_at__date__gte=last_30_days
+        )
+        if tenant:
+            events = events.filter(tenant=tenant)
+        
+        device_usage = events.exclude(device_type__isnull=True).exclude(device_type='').values(
+            'device_type'
+        ).annotate(count=Count('id'))
+        
+        total_device_events = sum(item['count'] for item in device_usage)
+        device_breakdown = {"desktop": 0, "mobile": 0, "tablet": 0}
+        if total_device_events > 0:
+            for item in device_usage:
+                device = item['device_type'].lower()
+                if device in device_breakdown:
+                    device_breakdown[device] = round((item['count'] / total_device_events) * 100, 1)
+        
+        return {
+            "optimal_study_hours": optimal_hours,
+            "preferred_study_days": preferred_days,
+            "average_session_duration_minutes": avg_session_minutes,
+            "total_sessions_last_30_days": sessions.count(),
+            "device_usage": device_breakdown,
+        }
+
+    @staticmethod
+    def _get_recommendations(user: User, tenant: Optional[Tenant]) -> Dict[str, Any]:
+        """Generate personalized recommendations based on learning data."""
+        recommendations = []
+        
+        # Check learning streak
+        streak = LearnerInsightsService._calculate_learning_streak(user, tenant)
+        if streak == 0:
+            recommendations.append({
+                "type": "engagement",
+                "priority": "high",
+                "title": "Resume Learning",
+                "description": "You haven't logged any learning activity recently. Try to dedicate at least 15 minutes today!",
+            })
+        elif streak < 3:
+            recommendations.append({
+                "type": "engagement",
+                "priority": "medium",
+                "title": "Build Your Streak",
+                "description": f"You're on a {streak}-day streak! Keep going to build strong learning habits.",
+            })
+        elif streak >= 7:
+            recommendations.append({
+                "type": "achievement",
+                "priority": "low",
+                "title": "Great Progress!",
+                "description": f"Excellent! You've maintained a {streak}-day learning streak. Keep up the momentum!",
+            })
+        
+        # Check for incomplete courses with high progress
+        enrollments = Enrollment.objects.filter(
+            user=user,
+            status=Enrollment.Status.ACTIVE
+        ).select_related('course')
+        if tenant:
+            enrollments = enrollments.filter(course__tenant=tenant)
+        
+        for enrollment in enrollments:
+            if enrollment.progress and enrollment.progress >= 80:
+                recommendations.append({
+                    "type": "completion",
+                    "priority": "high",
+                    "title": f"Almost Done: {enrollment.course.title}",
+                    "description": f"You're {enrollment.progress}% through this course. Just a bit more to earn your certificate!",
+                    "course_slug": enrollment.course.slug,
+                })
+        
+        # Check for courses with no recent activity
+        last_14_days = timezone.now() - timedelta(days=14)
+        for enrollment in enrollments.filter(progress__lt=80):
+            last_activity = Event.objects.filter(
+                user=user,
+                context_data__course_id=str(enrollment.course.id),
+                created_at__gte=last_14_days
+            ).exists()
+            
+            if not last_activity:
+                recommendations.append({
+                    "type": "reminder",
+                    "priority": "medium",
+                    "title": f"Continue: {enrollment.course.title}",
+                    "description": "You haven't visited this course in a while. Pick up where you left off!",
+                    "course_slug": enrollment.course.slug,
+                })
+        
+        # Check assessment performance and suggest improvement
+        attempts = AssessmentAttempt.objects.filter(
+            user=user,
+            status=AssessmentAttempt.AttemptStatus.GRADED,
+            is_passed=False
+        ).select_related('assessment', 'assessment__course')
+        if tenant:
+            attempts = attempts.filter(assessment__course__tenant=tenant)
+        
+        failed_assessments = attempts[:3]  # Top 3 recent failures
+        for attempt in failed_assessments:
+            recommendations.append({
+                "type": "improvement",
+                "priority": "medium",
+                "title": f"Review: {attempt.assessment.title}",
+                "description": f"Consider reviewing the material before retaking this assessment.",
+                "course_slug": attempt.assessment.course.slug,
+            })
+        
+        # Limit total recommendations
+        return {
+            "items": recommendations[:5],
+            "total_count": len(recommendations),
+        }
+
 
 # --- Async Task Definitions (if logging events asynchronously) ---
 # from celery import shared_task

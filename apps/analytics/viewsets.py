@@ -1,3 +1,4 @@
+import logging
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -8,11 +9,10 @@ from datetime import datetime, timedelta
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, TruncYear
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema, OpenApiParameter
-
 from .models import (
     CourseAnalytics, StudentEngagementMetric, InstructorAnalytics, 
     PredictiveAnalytics, AIInsights, RealTimeMetrics,
-    LearningEfficiency, SocialLearningMetrics, Report, Dashboard, Event,
+    LearningEfficiency, SocialLearningMetrics, Report, Dashboard, DashboardWidget, Event,
     StudentPerformance, EngagementMetrics, AssessmentAnalytics,
     LearningPathProgress, ContentInteraction, CourseCompletion,
     LearningObjectiveProgress, RevenueAnalytics, DeviceUsageAnalytics,
@@ -23,6 +23,8 @@ from .serializers import (
     InstructorAnalyticsSerializer, PredictiveAnalyticsSerializer,
     AIInsightsSerializer, RealTimeMetricsSerializer, LearningEfficiencySerializer,
     SocialLearningMetricsSerializer, ReportSerializer, DashboardSerializer,
+    DashboardListSerializer, DashboardDetailSerializer, DashboardCreateUpdateSerializer,
+    DashboardWidgetSerializer, WidgetCreateUpdateSerializer,
     StudentPerformanceSerializer, EngagementMetricsSerializer,
     AssessmentAnalyticsSerializer, LearningPathProgressSerializer,
     ContentInteractionSerializer, CourseCompletionSerializer,
@@ -30,11 +32,485 @@ from .serializers import (
     DeviceUsageAnalyticsSerializer, GeographicAnalyticsSerializer,
     InstructorAnalyticsDashboardSerializer, PredictiveAnalyticsDataSerializer,
     AIInsightsDataSerializer, RealTimeDataSerializer, SocialLearningDataSerializer,
-    LearningEfficiencyDataSerializer
+    LearningEfficiencyDataSerializer, EventLogSerializer
 )
 from .services import AnalyticsService
 from apps.courses.models import Course
+from apps.enrollments.models import Enrollment
 from apps.users.models import User
+from apps.users.permissions import IsAdmin
+from apps.core.models import Tenant
+
+
+@extend_schema(tags=['Analytics - Admin'])
+class AdminAnalyticsView(APIView):
+    """
+    Main API view for admin analytics dashboard.
+    Provides platform-wide analytics data across all tenants (for superusers)
+    or tenant-specific data (for tenant admins).
+    """
+    permission_classes = [IsAdmin]
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name='time_range', type=str, description='Time range filter (7d, 30d, 90d, 1y)'),
+            OpenApiParameter(name='tenant_id', type=str, description='Filter by specific tenant (superuser only)'),
+        ]
+    )
+    def get(self, request):
+        """Get comprehensive admin analytics data."""
+        user = request.user
+        
+        # Get filters
+        time_range = request.query_params.get('time_range', '30d')
+        tenant_id = request.query_params.get('tenant_id')
+        
+        # Calculate date range
+        end_date = timezone.now().date()
+        if time_range == '7d':
+            start_date = end_date - timedelta(days=7)
+        elif time_range == '30d':
+            start_date = end_date - timedelta(days=30)
+        elif time_range == '90d':
+            start_date = end_date - timedelta(days=90)
+        elif time_range == '1y':
+            start_date = end_date - timedelta(days=365)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Build analytics data
+        analytics_data = self._build_admin_analytics_data(user, start_date, end_date, tenant_id)
+        
+        return Response(analytics_data)
+
+    def _build_admin_analytics_data(self, user, start_date, end_date, tenant_id=None):
+        """Build comprehensive admin analytics data structure."""
+        
+        # Determine tenant scope
+        if user.is_superuser:
+            if tenant_id:
+                tenants = Tenant.objects.filter(id=tenant_id, is_active=True)
+            else:
+                tenants = Tenant.objects.filter(is_active=True)
+        else:
+            # Non-superuser admins can only see their own tenant
+            tenants = Tenant.objects.filter(id=user.tenant_id, is_active=True) if user.tenant else Tenant.objects.none()
+        
+        # Overview metrics
+        overview = self._get_overview_metrics(tenants, start_date, end_date)
+        
+        # User growth data
+        user_growth = self._get_user_growth(tenants, start_date, end_date)
+        
+        # Tenant comparison
+        tenant_comparison = self._get_tenant_comparison(tenants, start_date, end_date)
+        
+        # System activity
+        system_activity = self._get_system_activity(tenants, start_date, end_date)
+        
+        # Course metrics
+        course_metrics = self._get_course_metrics(tenants, start_date, end_date)
+        
+        # Real-time stats
+        real_time_stats = self._get_real_time_stats(tenants)
+        
+        # Event distribution
+        event_distribution = self._get_event_distribution(tenants, start_date, end_date)
+        
+        # Geographic distribution
+        geographic_data = self._get_geographic_distribution(tenants, start_date, end_date)
+        
+        # Device usage
+        device_usage = self._get_device_usage(tenants, start_date, end_date)
+        
+        return {
+            'overview': overview,
+            'userGrowth': user_growth,
+            'tenantComparison': tenant_comparison,
+            'systemActivity': system_activity,
+            'courseMetrics': course_metrics,
+            'realTimeStats': real_time_stats,
+            'eventDistribution': event_distribution,
+            'geographicData': geographic_data,
+            'deviceUsage': device_usage,
+        }
+
+    def _get_overview_metrics(self, tenants, start_date, end_date):
+        """Get overview metrics for admin dashboard."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Total users across selected tenants
+        total_users = User.objects.filter(tenant_id__in=tenant_ids).count()
+        
+        # Active users in last 24 hours (users who logged in)
+        yesterday = timezone.now() - timedelta(hours=24)
+        active_users_24h = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            event_type='USER_LOGIN',
+            created_at__gte=yesterday
+        ).values('user_id').distinct().count()
+        
+        # Total tenants
+        total_tenants = tenants.count()
+        
+        # Total courses
+        total_courses = Course.objects.filter(instructor__tenant_id__in=tenant_ids).count()
+        
+        # Total enrollments
+        total_enrollments = Enrollment.objects.filter(
+            course__instructor__tenant_id__in=tenant_ids
+        ).count()
+        
+        # New users in date range
+        new_users = User.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).count()
+        
+        # New enrollments in date range
+        new_enrollments = Enrollment.objects.filter(
+            course__instructor__tenant_id__in=tenant_ids,
+            enrolled_at__date__gte=start_date,
+            enrolled_at__date__lte=end_date
+        ).count()
+        
+        # Average completion rate
+        completion_stats = Enrollment.objects.filter(
+            course__instructor__tenant_id__in=tenant_ids
+        ).aggregate(
+            total=Count('id'),
+            completed=Count('id', filter=Q(status=Enrollment.Status.COMPLETED))
+        )
+        avg_completion_rate = (
+            (completion_stats['completed'] / completion_stats['total'] * 100) 
+            if completion_stats['total'] > 0 else 0
+        )
+        
+        return {
+            'totalUsers': total_users,
+            'activeUsers24h': active_users_24h,
+            'totalTenants': total_tenants,
+            'totalCourses': total_courses,
+            'totalEnrollments': total_enrollments,
+            'newUsers': new_users,
+            'newEnrollments': new_enrollments,
+            'avgCompletionRate': round(avg_completion_rate, 1),
+        }
+
+    def _get_user_growth(self, tenants, start_date, end_date):
+        """Get user registration trends over time."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Group registrations by date
+        user_registrations = User.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+        
+        growth_data = []
+        for item in user_registrations:
+            growth_data.append({
+                'date': item['date'].strftime('%Y-%m-%d'),
+                'users': item['count'],
+            })
+        
+        return growth_data
+
+    def _get_tenant_comparison(self, tenants, start_date, end_date):
+        """Get comparison metrics across tenants."""
+        comparison_data = []
+        
+        for tenant in tenants:
+            # Users count
+            users_count = User.objects.filter(tenant=tenant).count()
+            
+            # Courses count
+            courses_count = Course.objects.filter(instructor__tenant=tenant).count()
+            
+            # Enrollments count
+            enrollments_count = Enrollment.objects.filter(
+                course__instructor__tenant=tenant
+            ).count()
+            
+            # Active enrollments
+            active_enrollments = Enrollment.objects.filter(
+                course__instructor__tenant=tenant,
+                status=Enrollment.Status.ACTIVE
+            ).count()
+            
+            # Completed enrollments
+            completed_enrollments = Enrollment.objects.filter(
+                course__instructor__tenant=tenant,
+                status=Enrollment.Status.COMPLETED
+            ).count()
+            
+            comparison_data.append({
+                'id': str(tenant.id),
+                'name': tenant.name,
+                'slug': tenant.slug,
+                'users': users_count,
+                'courses': courses_count,
+                'enrollments': enrollments_count,
+                'activeEnrollments': active_enrollments,
+                'completedEnrollments': completed_enrollments,
+            })
+        
+        # Sort by enrollments descending
+        comparison_data.sort(key=lambda x: x['enrollments'], reverse=True)
+        
+        return comparison_data
+
+    def _get_system_activity(self, tenants, start_date, end_date):
+        """Get system activity metrics."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Events by type
+        events_by_type = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).values('event_type').annotate(
+            count=Count('id')
+        ).order_by('-count')[:10]
+        
+        events_data = [
+            {'type': item['event_type'], 'count': item['count']}
+            for item in events_by_type
+        ]
+        
+        # Login frequency by day
+        login_frequency = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            event_type='USER_LOGIN',
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+        
+        login_data = [
+            {'date': item['date'].strftime('%Y-%m-%d'), 'logins': item['count']}
+            for item in login_frequency
+        ]
+        
+        # Peak usage times (by hour)
+        from django.db.models.functions import ExtractHour
+        peak_times = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            hour=ExtractHour('created_at')
+        ).values('hour').annotate(
+            count=Count('id')
+        ).order_by('hour')
+        
+        peak_data = [
+            {'hour': item['hour'], 'events': item['count']}
+            for item in peak_times
+        ]
+        
+        return {
+            'eventsByType': events_data,
+            'loginFrequency': login_data,
+            'peakUsageTimes': peak_data,
+        }
+
+    def _get_course_metrics(self, tenants, start_date, end_date):
+        """Get course-related metrics."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Most popular courses (by enrollment)
+        popular_courses = Course.objects.filter(
+            instructor__tenant_id__in=tenant_ids
+        ).annotate(
+            enrollment_count=Count('enrollments')
+        ).order_by('-enrollment_count')[:10]
+        
+        popular_courses_data = [
+            {
+                'id': str(course.id),
+                'title': course.title,
+                'instructor': course.instructor.get_full_name(),
+                'tenant': course.instructor.tenant.name if course.instructor.tenant else 'N/A',
+                'enrollments': course.enrollment_count,
+            }
+            for course in popular_courses
+        ]
+        
+        # Course completion rates
+        courses_with_completions = Course.objects.filter(
+            instructor__tenant_id__in=tenant_ids
+        ).annotate(
+            total_enrollments=Count('enrollments'),
+            completed_enrollments=Count('enrollments', filter=Q(enrollments__status=Enrollment.Status.COMPLETED))
+        ).filter(total_enrollments__gt=0)
+        
+        completion_rates_data = []
+        for course in courses_with_completions[:10]:
+            completion_rate = (course.completed_enrollments / course.total_enrollments * 100)
+            completion_rates_data.append({
+                'id': str(course.id),
+                'title': course.title,
+                'completionRate': round(completion_rate, 1),
+                'totalEnrollments': course.total_enrollments,
+            })
+        
+        # Sort by completion rate
+        completion_rates_data.sort(key=lambda x: x['completionRate'], reverse=True)
+        
+        # Courses by status
+        courses_by_status = Course.objects.filter(
+            instructor__tenant_id__in=tenant_ids
+        ).values('status').annotate(
+            count=Count('id')
+        )
+        
+        status_data = [
+            {'status': item['status'], 'count': item['count']}
+            for item in courses_by_status
+        ]
+        
+        return {
+            'popularCourses': popular_courses_data,
+            'completionRates': completion_rates_data,
+            'coursesByStatus': status_data,
+        }
+
+    def _get_real_time_stats(self, tenants):
+        """Get real-time statistics."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Current active sessions (users with activity in last 15 minutes)
+        fifteen_minutes_ago = timezone.now() - timedelta(minutes=15)
+        active_sessions = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__gte=fifteen_minutes_ago
+        ).values('session_id').distinct().count()
+        
+        # Current logged in users (unique users in last 15 minutes)
+        current_logins = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__gte=fifteen_minutes_ago
+        ).values('user_id').distinct().count()
+        
+        # Events in last hour
+        one_hour_ago = timezone.now() - timedelta(hours=1)
+        events_last_hour = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__gte=one_hour_ago
+        ).count()
+        
+        # Latest events
+        latest_events = Event.objects.filter(
+            tenant_id__in=tenant_ids
+        ).select_related('user', 'tenant').order_by('-created_at')[:10]
+        
+        latest_events_data = []
+        for event in latest_events:
+            latest_events_data.append({
+                'id': str(event.id),
+                'type': event.event_type,
+                'user': event.user.email if event.user else 'Anonymous',
+                'tenant': event.tenant.name if event.tenant else 'System',
+                'timestamp': event.created_at.isoformat(),
+            })
+        
+        return {
+            'activeSessions': active_sessions,
+            'currentLogins': current_logins,
+            'eventsLastHour': events_last_hour,
+            'latestEvents': latest_events_data,
+        }
+
+    def _get_event_distribution(self, tenants, start_date, end_date):
+        """Get event type distribution."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Events by type for pie chart
+        event_distribution = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).values('event_type').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        
+        total_events = sum(item['count'] for item in event_distribution)
+        
+        distribution_data = []
+        for item in event_distribution:
+            percentage = (item['count'] / total_events * 100) if total_events > 0 else 0
+            distribution_data.append({
+                'type': item['event_type'],
+                'count': item['count'],
+                'percentage': round(percentage, 1),
+            })
+        
+        return distribution_data
+
+    def _get_geographic_distribution(self, tenants, start_date, end_date):
+        """Get geographic distribution of users."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Get geographic data from events
+        geo_data = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            country__isnull=False
+        ).exclude(country='').values('country', 'region').annotate(
+            users=Count('user_id', distinct=True),
+            events=Count('id')
+        ).order_by('-users')[:20]
+        
+        geographic_data = []
+        for item in geo_data:
+            geographic_data.append({
+                'country': item['country'],
+                'region': item['region'] or 'Unknown',
+                'users': item['users'],
+                'events': item['events'],
+            })
+        
+        return geographic_data
+
+    def _get_device_usage(self, tenants, start_date, end_date):
+        """Get device usage statistics."""
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Device distribution from events
+        device_stats = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            device_type__isnull=False
+        ).exclude(device_type='').values('device_type').annotate(
+            users=Count('user_id', distinct=True),
+            events=Count('id')
+        ).order_by('-users')
+        
+        total_users = sum(item['users'] for item in device_stats)
+        
+        device_data = []
+        for item in device_stats:
+            percentage = (item['users'] / total_users * 100) if total_users > 0 else 0
+            device_data.append({
+                'device': item['device_type'].capitalize(),
+                'users': item['users'],
+                'events': item['events'],
+                'percentage': round(percentage, 1),
+            })
+        
+        return device_data
 
 
 @extend_schema(tags=['Analytics - Reports'])
@@ -77,26 +553,685 @@ class ReportDefinitionViewSet(viewsets.ViewSet):
 
 
 @extend_schema(tags=['Analytics - Dashboards'])
-class DashboardDefinitionViewSet(viewsets.ViewSet):
+class DashboardDefinitionViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing analytics dashboards.
+    ViewSet for managing analytics dashboards with full CRUD operations.
+    Supports creating, editing, cloning, and deleting custom dashboards.
     """
     permission_classes = [permissions.IsAuthenticated]
 
-    def list(self, request):
-        """List all available dashboards."""
-        dashboards = Dashboard.objects.filter(tenant=request.user.tenant)
-        serializer = DashboardSerializer(dashboards, many=True)
+    def get_serializer_class(self):
+        """Return appropriate serializer based on action."""
+        if self.action == 'list':
+            return DashboardListSerializer
+        elif self.action in ['create', 'update', 'partial_update']:
+            return DashboardCreateUpdateSerializer
+        return DashboardDetailSerializer
+
+    def get_queryset(self):
+        """
+        Return dashboards accessible to the current user.
+        Users can see:
+        - Their own dashboards
+        - Shared dashboards within their tenant
+        - Default dashboards for their role
+        Staff users can see all dashboards in their tenant.
+        """
+        user = self.request.user
+        queryset = Dashboard.objects.filter(tenant=user.tenant)
+        
+        # Staff can see all dashboards in their tenant
+        if user.is_staff:
+            return queryset.select_related('owner', 'tenant').prefetch_related('widgets')
+        
+        # Get IDs of default dashboards that include the user's role
+        # Using Python filtering for SQLite/PostgreSQL compatibility
+        default_dashboard_ids = [
+            d.pk for d in queryset.filter(is_default=True)
+            if user.role in (d.allowed_roles or [])
+        ]
+        
+        # Filter based on visibility
+        # Show: own dashboards, shared dashboards, or default dashboards matching user role
+        queryset = queryset.filter(
+            Q(owner=user) |
+            Q(is_shared=True) |
+            Q(pk__in=default_dashboard_ids)
+        ).distinct()
+        
+        return queryset.select_related('owner', 'tenant').prefetch_related('widgets')
+
+    def perform_create(self, serializer):
+        """Set tenant and owner on create."""
+        serializer.save(
+            tenant=self.request.user.tenant,
+            owner=self.request.user
+        )
+
+    def perform_update(self, serializer):
+        """Ensure user can only update their own dashboards."""
+        dashboard = self.get_object()
+        if dashboard.owner != self.request.user and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only edit your own dashboards.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        """Ensure user can only delete their own dashboards."""
+        if instance.owner != self.request.user and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only delete your own dashboards.")
+        instance.delete()
+
+    @extend_schema(
+        request=None,
+        responses={201: DashboardDetailSerializer},
+        description="Clone an existing dashboard with all its widgets."
+    )
+    @action(detail=True, methods=['post'])
+    def clone(self, request, pk=None):
+        """
+        Clone a dashboard and all its widgets.
+        Creates a new dashboard with "(Copy)" appended to the name.
+        """
+        original = self.get_object()
+        
+        # Clone the dashboard
+        cloned_dashboard = Dashboard.objects.create(
+            tenant=request.user.tenant,
+            owner=request.user,
+            name=f"{original.name} (Copy)",
+            description=original.description,
+            is_default=False,
+            is_shared=False,
+            allowed_roles=original.allowed_roles,
+            refresh_interval=original.refresh_interval,
+            default_time_range=original.default_time_range,
+            layout_config=original.layout_config,
+        )
+        
+        # Clone all widgets
+        for widget in original.widgets.all():
+            DashboardWidget.objects.create(
+                dashboard=cloned_dashboard,
+                widget_type=widget.widget_type,
+                title=widget.title,
+                data_source=widget.data_source,
+                config=widget.config,
+                position_x=widget.position_x,
+                position_y=widget.position_y,
+                width=widget.width,
+                height=widget.height,
+                order=widget.order,
+            )
+        
+        serializer = DashboardDetailSerializer(cloned_dashboard)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        request=DashboardCreateUpdateSerializer,
+        responses={200: DashboardDetailSerializer},
+        description="Set a dashboard as the default for specified roles."
+    )
+    @action(detail=True, methods=['post'])
+    def set_default(self, request, pk=None):
+        """
+        Set a dashboard as the default for specified roles.
+        Only staff/admin users can set default dashboards.
+        """
+        if not request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only staff users can set default dashboards.")
+        
+        dashboard = self.get_object()
+        roles = request.data.get('roles', [])
+        
+        # Remove default status from other dashboards for these roles
+        # (each role should have only one default dashboard)
+        # Using Python filtering for SQLite/PostgreSQL compatibility
+        for role in roles:
+            conflicting_dashboards = [
+                d.pk for d in Dashboard.objects.filter(
+                    tenant=request.user.tenant,
+                    is_default=True,
+                ).exclude(pk=dashboard.pk)
+                if role in (d.allowed_roles or [])
+            ]
+            if conflicting_dashboards:
+                Dashboard.objects.filter(pk__in=conflicting_dashboards).update(is_default=False)
+        
+        dashboard.is_default = True
+        dashboard.allowed_roles = roles
+        dashboard.save()
+        
+        serializer = DashboardDetailSerializer(dashboard)
         return Response(serializer.data)
 
-    def retrieve(self, request, pk=None):
-        """Get a specific dashboard definition."""
-        dashboard = get_object_or_404(Dashboard, pk=pk, tenant=request.user.tenant)
-        serializer = DashboardSerializer(dashboard)
+    @action(detail=True, methods=['post'])
+    def share(self, request, pk=None):
+        """Toggle sharing status of a dashboard."""
+        dashboard = self.get_object()
+        
+        if dashboard.owner != request.user and not request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only share your own dashboards.")
+        
+        is_shared = request.data.get('is_shared', not dashboard.is_shared)
+        dashboard.is_shared = is_shared
+        dashboard.save()
+        
+        serializer = DashboardDetailSerializer(dashboard)
         return Response(serializer.data)
 
 
-@extend_schema(tags=['Analytics - Main'])
+@extend_schema(tags=['Analytics - Widgets'])
+class DashboardWidgetViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing widgets within a dashboard.
+    Nested under dashboards: /dashboards/{dashboard_id}/widgets/
+    """
+    serializer_class = DashboardWidgetSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        """Return widgets for the specified dashboard."""
+        dashboard_id = self.kwargs.get('dashboard_pk')
+        return DashboardWidget.objects.filter(
+            dashboard_id=dashboard_id,
+            dashboard__tenant=self.request.user.tenant
+        ).order_by('order', 'position_y', 'position_x')
+
+    def get_serializer_class(self):
+        """Return appropriate serializer based on action."""
+        if self.action in ['create', 'update', 'partial_update']:
+            return WidgetCreateUpdateSerializer
+        return DashboardWidgetSerializer
+
+    def perform_create(self, serializer):
+        """Create widget within the specified dashboard."""
+        dashboard_id = self.kwargs.get('dashboard_pk')
+        dashboard = get_object_or_404(
+            Dashboard, 
+            pk=dashboard_id, 
+            tenant=self.request.user.tenant
+        )
+        
+        # Check ownership
+        if dashboard.owner != self.request.user and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only add widgets to your own dashboards.")
+        
+        serializer.save(dashboard=dashboard)
+
+    def perform_update(self, serializer):
+        """Update widget, checking dashboard ownership."""
+        widget = self.get_object()
+        if widget.dashboard.owner != self.request.user and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only edit widgets in your own dashboards.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        """Delete widget, checking dashboard ownership."""
+        if instance.dashboard.owner != self.request.user and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only delete widgets from your own dashboards.")
+        instance.delete()
+
+    @extend_schema(
+        request={'application/json': {'type': 'array', 'items': {'type': 'object'}}},
+        responses={200: DashboardWidgetSerializer(many=True)},
+        description="Bulk update widget positions/sizes for drag-and-drop operations."
+    )
+    @action(detail=False, methods=['post'])
+    def bulk_update_positions(self, request, dashboard_pk=None):
+        """
+        Bulk update widget positions after drag-and-drop.
+        Expects a list of {id, position_x, position_y, width, height} objects.
+        """
+        dashboard = get_object_or_404(
+            Dashboard, 
+            pk=dashboard_pk, 
+            tenant=request.user.tenant
+        )
+        
+        if dashboard.owner != request.user and not request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only update widgets in your own dashboards.")
+        
+        updates = request.data
+        if not isinstance(updates, list):
+            return Response(
+                {'error': 'Expected a list of widget position updates'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        updated_widgets = []
+        for update in updates:
+            widget_id = update.get('id')
+            if not widget_id:
+                continue
+            
+            try:
+                widget = DashboardWidget.objects.get(
+                    id=widget_id, 
+                    dashboard=dashboard
+                )
+                
+                if 'position_x' in update:
+                    widget.position_x = update['position_x']
+                if 'position_y' in update:
+                    widget.position_y = update['position_y']
+                if 'width' in update:
+                    widget.width = update['width']
+                if 'height' in update:
+                    widget.height = update['height']
+                if 'order' in update:
+                    widget.order = update['order']
+                
+                widget.save()
+                updated_widgets.append(widget)
+            except DashboardWidget.DoesNotExist:
+                continue
+        
+        serializer = DashboardWidgetSerializer(updated_widgets, many=True)
+        return Response(serializer.data)
+
+
+@extend_schema(tags=['Analytics - Widget Data'])
+class WidgetDataView(APIView):
+    """
+    API view for fetching widget data based on data source.
+    This endpoint returns the actual data for a widget to display.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name='time_range', type=str, description='Time range (7d, 30d, 90d, 1y)'),
+            OpenApiParameter(name='tenant_id', type=str, description='Filter by tenant (admin only)'),
+        ],
+        responses={200: {'type': 'object'}},
+    )
+    def get(self, request, widget_id=None):
+        """
+        Get data for a specific widget.
+        The data returned depends on the widget's data_source.
+        """
+        widget = get_object_or_404(
+            DashboardWidget,
+            pk=widget_id,
+            dashboard__tenant=request.user.tenant
+        )
+        
+        # Get query parameters
+        time_range = request.query_params.get('time_range', '30d')
+        tenant_id = request.query_params.get('tenant_id')
+        
+        # Calculate date range
+        end_date = timezone.now().date()
+        if time_range == '7d':
+            start_date = end_date - timedelta(days=7)
+        elif time_range == '30d':
+            start_date = end_date - timedelta(days=30)
+        elif time_range == '90d':
+            start_date = end_date - timedelta(days=90)
+        elif time_range == '1y':
+            start_date = end_date - timedelta(days=365)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get data based on data source
+        data = self._get_widget_data(
+            widget.data_source,
+            request.user,
+            start_date,
+            end_date,
+            tenant_id,
+            widget.config
+        )
+        
+        return Response({
+            'widget_id': str(widget.id),
+            'data_source': widget.data_source,
+            'time_range': time_range,
+            'data': data
+        })
+
+    def _get_widget_data(self, data_source, user, start_date, end_date, tenant_id, config):
+        """
+        Fetch data based on the data source type.
+        Maps data sources to existing analytics methods.
+        """
+        # Determine tenant scope
+        if user.is_superuser and tenant_id:
+            tenants = Tenant.objects.filter(id=tenant_id, is_active=True)
+        elif user.is_superuser:
+            tenants = Tenant.objects.filter(is_active=True)
+        else:
+            tenants = Tenant.objects.filter(id=user.tenant_id) if user.tenant else Tenant.objects.none()
+        
+        tenant_ids = list(tenants.values_list('id', flat=True))
+        
+        # Route to appropriate data fetcher
+        data_fetchers = {
+            'user_growth': self._get_user_growth_data,
+            'enrollment_stats': self._get_enrollment_stats,
+            'course_metrics': self._get_course_metrics,
+            'completion_rates': self._get_completion_rates,
+            'login_frequency': self._get_login_frequency,
+            'peak_usage': self._get_peak_usage,
+            'tenant_comparison': self._get_tenant_comparison,
+            'device_usage': self._get_device_usage,
+            'geographic_data': self._get_geographic_data,
+            'events_by_type': self._get_events_by_type,
+            'popular_courses': self._get_popular_courses,
+            'active_users': self._get_active_users,
+            'recent_activity': self._get_recent_activity,
+        }
+        
+        fetcher = data_fetchers.get(data_source)
+        if fetcher:
+            return fetcher(tenant_ids, start_date, end_date, config)
+        
+        return {'error': f'Unknown data source: {data_source}'}
+
+    def _get_user_growth_data(self, tenant_ids, start_date, end_date, config):
+        """Get user registration trends over time."""
+        user_registrations = User.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+        
+        return [
+            {'date': item['date'].strftime('%Y-%m-%d'), 'value': item['count']}
+            for item in user_registrations
+        ]
+
+    def _get_enrollment_stats(self, tenant_ids, start_date, end_date, config):
+        """Get enrollment statistics."""
+        enrollments = Enrollment.objects.filter(
+            course__instructor__tenant_id__in=tenant_ids,
+            enrolled_at__date__gte=start_date,
+            enrolled_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('enrolled_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+        
+        return [
+            {'date': item['date'].strftime('%Y-%m-%d'), 'value': item['count']}
+            for item in enrollments
+        ]
+
+    def _get_course_metrics(self, tenant_ids, start_date, end_date, config):
+        """Get course performance metrics."""
+        courses = Course.objects.filter(
+            instructor__tenant_id__in=tenant_ids
+        ).annotate(
+            enrollment_count=Count('enrollments'),
+            completion_count=Count('enrollments', filter=Q(enrollments__status=Enrollment.Status.COMPLETED))
+        ).order_by('-enrollment_count')[:10]
+        
+        return [
+            {
+                'title': course.title,
+                'enrollments': course.enrollment_count,
+                'completions': course.completion_count,
+                'completion_rate': round((course.completion_count / course.enrollment_count * 100), 1) if course.enrollment_count > 0 else 0
+            }
+            for course in courses
+        ]
+
+    def _get_completion_rates(self, tenant_ids, start_date, end_date, config):
+        """Get completion rate trends."""
+        completion_data = Enrollment.objects.filter(
+            course__instructor__tenant_id__in=tenant_ids,
+            enrolled_at__date__gte=start_date,
+            enrolled_at__date__lte=end_date
+        ).annotate(
+            month=TruncMonth('enrolled_at')
+        ).values('month').annotate(
+            total=Count('id'),
+            completed=Count('id', filter=Q(status=Enrollment.Status.COMPLETED))
+        ).order_by('month')
+        
+        return [
+            {
+                'date': item['month'].strftime('%Y-%m'),
+                'rate': round((item['completed'] / item['total'] * 100), 1) if item['total'] > 0 else 0
+            }
+            for item in completion_data
+        ]
+
+    def _get_login_frequency(self, tenant_ids, start_date, end_date, config):
+        """Get login frequency data."""
+        login_data = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            event_type='USER_LOGIN',
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+        
+        return [
+            {'date': item['date'].strftime('%Y-%m-%d'), 'value': item['count']}
+            for item in login_data
+        ]
+
+    def _get_peak_usage(self, tenant_ids, start_date, end_date, config):
+        """Get peak usage times by hour."""
+        from django.db.models.functions import ExtractHour
+        
+        peak_data = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            hour=ExtractHour('created_at')
+        ).values('hour').annotate(
+            count=Count('id')
+        ).order_by('hour')
+        
+        return [
+            {'hour': item['hour'], 'value': item['count']}
+            for item in peak_data
+        ]
+
+    def _get_tenant_comparison(self, tenant_ids, start_date, end_date, config):
+        """Get cross-tenant comparison metrics."""
+        tenants = Tenant.objects.filter(id__in=tenant_ids, is_active=True)
+        
+        comparison_data = []
+        for tenant in tenants:
+            users_count = User.objects.filter(tenant=tenant).count()
+            courses_count = Course.objects.filter(instructor__tenant=tenant).count()
+            enrollments_count = Enrollment.objects.filter(
+                course__instructor__tenant=tenant
+            ).count()
+            
+            comparison_data.append({
+                'name': tenant.name,
+                'users': users_count,
+                'courses': courses_count,
+                'enrollments': enrollments_count,
+            })
+        
+        return comparison_data
+
+    def _get_device_usage(self, tenant_ids, start_date, end_date, config):
+        """Get device usage distribution."""
+        device_stats = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            device_type__isnull=False
+        ).exclude(device_type='').values('device_type').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        
+        return [
+            {'device': item['device_type'].capitalize(), 'value': item['count']}
+            for item in device_stats
+        ]
+
+    def _get_geographic_data(self, tenant_ids, start_date, end_date, config):
+        """Get geographic distribution of users."""
+        geo_data = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            country__isnull=False
+        ).exclude(country='').values('country').annotate(
+            users=Count('user_id', distinct=True)
+        ).order_by('-users')[:20]
+        
+        return [
+            {'country': item['country'], 'value': item['users']}
+            for item in geo_data
+        ]
+
+    def _get_events_by_type(self, tenant_ids, start_date, end_date, config):
+        """Get event distribution by type."""
+        event_data = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).values('event_type').annotate(
+            count=Count('id')
+        ).order_by('-count')[:10]
+        
+        return [
+            {'type': item['event_type'], 'value': item['count']}
+            for item in event_data
+        ]
+
+    def _get_popular_courses(self, tenant_ids, start_date, end_date, config):
+        """Get most popular courses by enrollment."""
+        courses = Course.objects.filter(
+            instructor__tenant_id__in=tenant_ids
+        ).annotate(
+            enrollment_count=Count('enrollments')
+        ).order_by('-enrollment_count')[:10]
+        
+        return [
+            {
+                'title': course.title,
+                'instructor': course.instructor.get_full_name(),
+                'enrollments': course.enrollment_count,
+            }
+            for course in courses
+        ]
+
+    def _get_active_users(self, tenant_ids, start_date, end_date, config):
+        """Get active user counts over time."""
+        active_users = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            active_users=Count('user_id', distinct=True)
+        ).order_by('date')
+        
+        return [
+            {'date': item['date'].strftime('%Y-%m-%d'), 'value': item['active_users']}
+            for item in active_users
+        ]
+
+    def _get_recent_activity(self, tenant_ids, start_date, end_date, config):
+        """Get recent activity feed."""
+        events = Event.objects.filter(
+            tenant_id__in=tenant_ids,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).select_related('user').order_by('-created_at')[:20]
+        
+        return [
+            {
+                'type': event.event_type,
+                'user': event.user.email if event.user else 'Anonymous',
+                'timestamp': event.created_at.isoformat(),
+            }
+            for event in events
+        ]
+
+
+@extend_schema(tags=['Analytics - Widget Meta'])
+class WidgetMetaView(APIView):
+    """
+    API view for getting widget metadata (types and data sources).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['get'])
+    def get(self, request):
+        """Get available widget types and data sources."""
+        widget_types = [
+            {
+                'value': choice[0],
+                'label': choice[1],
+                'description': self._get_widget_type_description(choice[0])
+            }
+            for choice in DashboardWidget.WidgetType.choices
+        ]
+        
+        data_sources = [
+            {
+                'value': choice[0],
+                'label': choice[1],
+                'description': self._get_data_source_description(choice[0])
+            }
+            for choice in DashboardWidget.DataSource.choices
+        ]
+        
+        return Response({
+            'widget_types': widget_types,
+            'data_sources': data_sources,
+        })
+
+    def _get_widget_type_description(self, widget_type):
+        """Get description for a widget type."""
+        descriptions = {
+            'stat_card': 'Display a single KPI with optional trend indicator',
+            'line_chart': 'Time-series data with line visualization',
+            'bar_chart': 'Categorical data with bar visualization',
+            'pie_chart': 'Distribution data with pie/donut chart',
+            'area_chart': 'Time-series with filled area under the line',
+            'table': 'Tabular data display with sorting and pagination',
+            'progress_ring': 'Circular progress indicator for single metric',
+            'leaderboard': 'Ranked list of items',
+        }
+        return descriptions.get(widget_type, '')
+
+    def _get_data_source_description(self, data_source):
+        """Get description for a data source."""
+        descriptions = {
+            'user_growth': 'User registration trends over time',
+            'enrollment_stats': 'Course enrollment statistics',
+            'course_metrics': 'Course performance metrics',
+            'completion_rates': 'Course completion rate trends',
+            'login_frequency': 'User login activity over time',
+            'peak_usage': 'Peak usage hours distribution',
+            'tenant_comparison': 'Cross-tenant comparison metrics',
+            'device_usage': 'Device type distribution',
+            'geographic_data': 'User geographic distribution',
+            'events_by_type': 'Event type breakdown',
+            'popular_courses': 'Top courses by enrollment',
+            'active_users': 'Active user counts over time',
+            'recent_activity': 'Recent user activity feed',
+        }
+        return descriptions.get(data_source, '')
 class InstructorAnalyticsView(APIView):
     """
     Main API view for instructor analytics dashboard.
@@ -213,8 +1348,16 @@ class InstructorAnalyticsView(APIView):
 
     def _get_overview_metrics(self, user, courses, start_date, end_date):
         """Get overview metrics."""
+        # Total students: distinct users enrolled in instructor's courses
         total_students = User.objects.filter(
             enrollments__course__in=courses,
+            role=User.Role.LEARNER
+        ).distinct().count()
+        
+        # Active students: distinct users with ACTIVE enrollment status
+        active_students = User.objects.filter(
+            enrollments__course__in=courses,
+            enrollments__status=Enrollment.Status.ACTIVE,
             role=User.Role.LEARNER
         ).distinct().count()
         
@@ -231,17 +1374,20 @@ class InstructorAnalyticsView(APIView):
         
         total_revenue = revenue_analytics['total_revenue'] or 0
         
-        # Get completion rate
-        total_enrollments = User.objects.filter(
-            enrollments__course__in=courses
-        ).count()
+        # Get average completion rate per course (consistent with Dashboard)
+        # Dashboard calculates completion rate per course, then averages them
+        course_completion_rates = []
+        for course in courses:
+            total_enrollments_course = Enrollment.objects.filter(course=course).count()
+            completed_enrollments = Enrollment.objects.filter(
+                course=course,
+                status=Enrollment.Status.COMPLETED
+            ).count()
+            if total_enrollments_course > 0:
+                rate = (completed_enrollments / total_enrollments_course) * 100
+                course_completion_rates.append(rate)
         
-        completed_courses = CourseCompletion.objects.filter(
-            course__in=courses,
-            completion_date__isnull=False
-        ).count()
-        
-        completion_rate = (completed_courses / total_enrollments * 100) if total_enrollments > 0 else 0
+        completion_rate = sum(course_completion_rates) / len(course_completion_rates) if course_completion_rates else 0
         
         # Get average rating from CourseAnalytics
         course_ids = list(courses.values_list('id', flat=True))
@@ -267,6 +1413,7 @@ class InstructorAnalyticsView(APIView):
         
         return {
             'totalStudents': total_students,
+            'activeStudents': active_students,
             'totalCourses': total_courses,
             'totalRevenue': float(total_revenue),
             'avgRating': round(avg_rating, 1),
@@ -285,14 +1432,14 @@ class InstructorAnalyticsView(APIView):
                 role=User.Role.LEARNER
             ).distinct().count()
             
-            # Get completion rate
-            enrollments = User.objects.filter(enrollments__course=course).count()
-            completions = CourseCompletion.objects.filter(
+            # Get completion rate using Enrollment.Status.COMPLETED (consistent with Dashboard)
+            total_enrollments = Enrollment.objects.filter(course=course).count()
+            completed_enrollments = Enrollment.objects.filter(
                 course=course,
-                completion_date__isnull=False
+                status=Enrollment.Status.COMPLETED
             ).count()
             
-            completion_rate = (completions / enrollments * 100) if enrollments > 0 else 0
+            completion_rate = (completed_enrollments / total_enrollments * 100) if total_enrollments > 0 else 0
             
             # Get revenue
             revenue = RevenueAnalytics.objects.filter(
@@ -433,11 +1580,11 @@ class InstructorAnalyticsView(APIView):
         # Sort by completion rate
         top_courses.sort(key=lambda x: x['value'], reverse=True)
         
-        # Top students
+        # Top students (use __date for proper date comparison with datetime fields)
         top_students = StudentPerformance.objects.filter(
             course__in=courses,
-            created_at__gte=start_date,
-            created_at__lte=end_date
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
         ).select_related('student', 'course').order_by('-score')[:10]
         
         top_students_data = []
@@ -455,28 +1602,36 @@ class InstructorAnalyticsView(APIView):
         }
 
     def _get_student_distribution(self, courses):
-        """Get student distribution data."""
+        """Get student distribution data using Enrollment status (consistent with Dashboard)."""
+        # Total students enrolled in any of the instructor's courses
         total_students = User.objects.filter(
             enrollments__course__in=courses,
             role=User.Role.LEARNER
         ).distinct().count()
         
-        # Active students (those with recent activity)
+        # Active students: those with Enrollment.Status.ACTIVE
         active_students = User.objects.filter(
             enrollments__course__in=courses,
-            role=User.Role.LEARNER,
-            last_login__gte=timezone.now() - timedelta(days=7)
+            enrollments__status=Enrollment.Status.ACTIVE,
+            role=User.Role.LEARNER
         ).distinct().count()
         
-        # Completed courses
-        completed_students = CourseCompletion.objects.filter(
-            course__in=courses,
-            completion_date__isnull=False
-        ).values('student').distinct().count()
+        # Completed students: those with Enrollment.Status.COMPLETED
+        completed_students = User.objects.filter(
+            enrollments__course__in=courses,
+            enrollments__status=Enrollment.Status.COMPLETED,
+            role=User.Role.LEARNER
+        ).distinct().count()
         
-        # Calculate inactive and dropped
-        inactive_students = total_students - active_students
-        dropped_students = max(0, total_students - completed_students - active_students)
+        # Dropped students: those with Enrollment.Status.CANCELLED (dropped or removed)
+        dropped_students = User.objects.filter(
+            enrollments__course__in=courses,
+            enrollments__status=Enrollment.Status.CANCELLED,
+            role=User.Role.LEARNER
+        ).distinct().count()
+        
+        # Inactive students: total - active - completed - dropped
+        inactive_students = max(0, total_students - active_students - completed_students - dropped_students)
         
         return [
             {'name': 'Active Students', 'value': active_students, 'color': '#0088FE'},
@@ -686,32 +1841,45 @@ class InstructorAnalyticsView(APIView):
 
     def _get_learning_paths(self, courses, start_date, end_date):
         """Get learning path analytics from real data."""
-        from apps.learning_paths.models import LearningPath
+        from apps.learning_paths.models import LearningPath, LearningPathStep
+        from django.contrib.contenttypes.models import ContentType
         
         # Get learning paths that include any of the instructor's courses
         course_ids = list(courses.values_list('id', flat=True))
         
-        # Query learning path progress data
+        # LearningPath uses GenericForeignKey via LearningPathStep to link to courses
+        # First, find LearningPathStep entries that link to the instructor's courses
+        course_content_type = ContentType.objects.get_for_model(courses.model)
+        
+        # Get learning path IDs that contain the instructor's courses
+        learning_path_ids = LearningPathStep.objects.filter(
+            content_type=course_content_type,
+            object_id__in=course_ids
+        ).values_list('learning_path_id', flat=True).distinct()
+        
+        # Query learning path progress data for those learning paths
+        # Note: LearningPathProgress doesn't have completion_percentage or actual_time_spent fields
+        # It has status field and progress_percentage property calculated from step_progress
         learning_path_data = LearningPathProgress.objects.filter(
-            learning_path__courses__in=course_ids,
+            learning_path_id__in=learning_path_ids,
             created_at__date__gte=start_date,
             created_at__date__lte=end_date
         ).values('learning_path__title').annotate(
-            completion_rate=Avg('completion_percentage'),
-            avg_time_hours=Avg('actual_time_spent')
-        ).order_by('-completion_rate')
+            total_count=Count('id'),
+            completed_count=Count('id', filter=Q(status='COMPLETED'))
+        ).order_by('-completed_count')
         
         result = []
         for item in learning_path_data:
-            # Convert timedelta to hours if present
-            avg_time = 0
-            if item['avg_time_hours']:
-                avg_time = item['avg_time_hours'].total_seconds() / 3600
+            # Calculate completion rate as percentage of completed progress records
+            total = item['total_count'] or 1
+            completed = item['completed_count'] or 0
+            completion_rate = (completed / total) * 100
             
             result.append({
                 'path': item['learning_path__title'],
-                'completionRate': round(float(item['completion_rate'] or 0), 1),
-                'avgTime': round(avg_time, 1),
+                'completionRate': round(completion_rate, 1),
+                'avgTime': 0,  # Time tracking not available in current model
             })
         
         # Return empty array if no data (no mock)
@@ -947,8 +2115,9 @@ class EngagementMetricsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
+        from apps.users.models import User
         user = self.request.user
-        if user.is_instructor:
+        if user.role == User.Role.INSTRUCTOR:
             return EngagementMetrics.objects.filter(course__instructor=user)
         return EngagementMetrics.objects.none()
 
@@ -962,8 +2131,9 @@ class AssessmentAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
+        from apps.users.models import User
         user = self.request.user
-        if user.is_instructor:
+        if user.role == User.Role.INSTRUCTOR:
             return AssessmentAnalytics.objects.filter(assessment__course__instructor=user)
         return AssessmentAnalytics.objects.none()
 
@@ -986,3 +2156,233 @@ class AnalyticsTrackingView(APIView):
             )
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=['Analytics - Event Log'])
+class EventLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing and filtering event logs (admin only).
+    Provides list and detail views with filtering by event type, user, date range.
+    """
+    serializer_class = EventLogSerializer
+    permission_classes = [IsAdmin]
+
+    def get_queryset(self):
+        """
+        Return events filtered by tenant and optional query parameters.
+        """
+        user = self.request.user
+        queryset = Event.objects.select_related('user', 'tenant')
+
+        # Filter by tenant for non-superusers
+        if not user.is_superuser and hasattr(user, 'tenant') and user.tenant:
+            queryset = queryset.filter(tenant=user.tenant)
+
+        # Filter by event type
+        event_type = self.request.query_params.get('event_type')
+        if event_type:
+            queryset = queryset.filter(event_type=event_type)
+
+        # Filter by user ID
+        user_id = self.request.query_params.get('user_id')
+        if user_id:
+            queryset = queryset.filter(user_id=user_id)
+
+        # Filter by date range
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(created_at__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(created_at__date__lte=end_date)
+
+        # Filter by device type
+        device_type = self.request.query_params.get('device_type')
+        if device_type:
+            queryset = queryset.filter(device_type=device_type)
+
+        # Filter by country
+        country = self.request.query_params.get('country')
+        if country:
+            queryset = queryset.filter(country=country)
+
+        # Search in context_data (basic search)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(user__email__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(session_id__icontains=search) |
+                Q(ip_address__icontains=search)
+            )
+
+        return queryset.order_by('-created_at')
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name='event_type', type=str, description='Filter by event type'),
+            OpenApiParameter(name='user_id', type=str, description='Filter by user ID'),
+            OpenApiParameter(name='start_date', type=str, description='Filter by start date (YYYY-MM-DD)'),
+            OpenApiParameter(name='end_date', type=str, description='Filter by end date (YYYY-MM-DD)'),
+            OpenApiParameter(name='device_type', type=str, description='Filter by device type'),
+            OpenApiParameter(name='country', type=str, description='Filter by country'),
+            OpenApiParameter(name='search', type=str, description='Search in user email, name, session ID, or IP'),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        """List events with pagination and filtering."""
+        return super().list(request, *args, **kwargs)
+
+    @action(detail=False, methods=['get'])
+    def event_types(self, request):
+        """Return available event types for filtering."""
+        event_types = [
+            {'value': choice[0], 'label': choice[1]}
+            for choice in Event.EVENT_TYPES
+        ]
+        return Response(event_types)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """Return event statistics for the dashboard."""
+        queryset = self.get_queryset()
+        
+        # Get date range from params or default to last 7 days
+        end_date = timezone.now().date()
+        start_date = end_date - timedelta(days=7)
+        
+        start_date_param = request.query_params.get('start_date')
+        end_date_param = request.query_params.get('end_date')
+        if start_date_param:
+            start_date = start_date_param
+        if end_date_param:
+            end_date = end_date_param
+
+        # Total events
+        total_events = queryset.count()
+
+        # Events by type
+        events_by_type = queryset.values('event_type').annotate(
+            count=Count('id')
+        ).order_by('-count')[:10]
+
+        # Events by day
+        events_by_day = queryset.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        ).annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            count=Count('id')
+        ).order_by('date')
+
+        # Events by device type
+        events_by_device = queryset.exclude(
+            device_type__isnull=True
+        ).values('device_type').annotate(
+            count=Count('id')
+        ).order_by('-count')
+
+        return Response({
+            'total_events': total_events,
+            'events_by_type': list(events_by_type),
+            'events_by_day': list(events_by_day),
+            'events_by_device': list(events_by_device),
+        })
+
+
+@extend_schema(tags=['Analytics - Learner Insights'])
+class LearnerInsightsView(APIView):
+    """
+    API view for learner insights and personalized analytics.
+    
+    Provides comprehensive analytics data for individual learners including:
+    - Overview statistics (courses enrolled, completed, learning hours, streak)
+    - Learning activity patterns and engagement metrics
+    - Course progress across all enrolled courses
+    - Assessment performance analytics
+    - Learning patterns and study habits
+    - Personalized recommendations
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='tenant_id',
+                type=str,
+                description='Filter insights by tenant (optional, defaults to user tenant)',
+                required=False
+            ),
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'user_id': {'type': 'string'},
+                    'generated_at': {'type': 'string', 'format': 'date-time'},
+                    'overview': {
+                        'type': 'object',
+                        'properties': {
+                            'total_courses_enrolled': {'type': 'integer'},
+                            'courses_completed': {'type': 'integer'},
+                            'courses_in_progress': {'type': 'integer'},
+                            'overall_progress_percentage': {'type': 'number'},
+                            'total_learning_hours': {'type': 'number'},
+                            'current_streak_days': {'type': 'integer'},
+                            'certificates_earned': {'type': 'integer'},
+                        }
+                    },
+                    'learning_activity': {'type': 'object'},
+                    'course_progress': {'type': 'array'},
+                    'assessment_performance': {'type': 'object'},
+                    'learning_patterns': {'type': 'object'},
+                    'recommendations': {'type': 'object'},
+                }
+            }
+        },
+        description="Get comprehensive learner insights and analytics for the authenticated user."
+    )
+    def get(self, request):
+        """
+        Get learner insights for the authenticated user.
+        
+        Returns personalized analytics including:
+        - overview: Summary statistics (courses, progress, hours, streak, certificates)
+        - learning_activity: Recent activity patterns and engagement
+        - course_progress: Detailed progress for each enrolled course
+        - assessment_performance: Assessment scores, trends, and performance by type
+        - learning_patterns: Study habits, optimal times, device usage
+        - recommendations: Personalized suggestions for improvement
+        """
+        from .services import LearnerInsightsService
+        
+        user = request.user
+        
+        # Get optional tenant filter
+        tenant = None
+        tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            try:
+                tenant = Tenant.objects.get(id=tenant_id, is_active=True)
+            except Tenant.DoesNotExist:
+                pass
+        elif user.tenant:
+            tenant = user.tenant
+        
+        try:
+            insights = LearnerInsightsService.get_learner_insights(user, tenant)
+            return Response(insights)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.exception("Failed to generate learner insights: %s", str(e))
+            return Response(
+                {'error': 'Failed to generate learner insights'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
