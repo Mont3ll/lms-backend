@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ContentItem, ContentVersion, Course, Module
+from .models import ContentItem, ContentVersion, Course, CoursePrerequisite, Module, ModulePrerequisite
 
 
 class ModuleInline(admin.StackedInline):  # Or TabularInline
@@ -16,6 +16,24 @@ class ContentItemInline(admin.StackedInline):  # Or TabularInline
     ordering = ("order",)
     fields = ("title", "content_type", "order", "is_published")  # Customize fields
     # Add fields relevant to content data based on type (might require custom admin logic)
+
+
+class CoursePrerequisiteInline(admin.TabularInline):
+    """Inline for managing course prerequisites directly from the Course admin."""
+    model = CoursePrerequisite
+    fk_name = 'course'
+    extra = 1
+    autocomplete_fields = ['prerequisite_course']
+    fields = ('prerequisite_course', 'prerequisite_type', 'minimum_completion_percentage')
+
+
+class ModulePrerequisiteInline(admin.TabularInline):
+    """Inline for managing module prerequisites directly from the Module admin."""
+    model = ModulePrerequisite
+    fk_name = 'module'
+    extra = 1
+    autocomplete_fields = ['prerequisite_module']
+    fields = ('prerequisite_module', 'prerequisite_type', 'minimum_score')
 
 
 @admin.register(Course)
@@ -39,7 +57,7 @@ class CourseAdmin(admin.ModelAdmin):
     )
     prepopulated_fields = {"slug": ("title",)}
     list_select_related = ("tenant", "instructor")
-    inlines = [ModuleInline]
+    inlines = [ModuleInline, CoursePrerequisiteInline]
     # Add fieldsets for better organization
     fieldsets = (
         (None, {"fields": ("tenant", "title", "slug", "instructor", "status")}),
@@ -58,7 +76,7 @@ class ModuleAdmin(admin.ModelAdmin):
     list_filter = ("course__tenant", "course")
     search_fields = ("title", "description", "course__title")
     list_select_related = ("course", "course__tenant")  # Optimize queries
-    inlines = [ContentItemInline]
+    inlines = [ContentItemInline, ModulePrerequisiteInline]
     ordering = ("course__title", "order")
 
     def content_item_count(self, obj):
@@ -133,3 +151,59 @@ class ContentVersionAdmin(admin.ModelAdmin):
 
     content_item_title.short_description = "Content Item"
     content_item_title.admin_order_field = "content_item__title"
+
+
+@admin.register(CoursePrerequisite)
+class CoursePrerequisiteAdmin(admin.ModelAdmin):
+    """Admin for managing course prerequisites."""
+    list_display = (
+        "course",
+        "prerequisite_course",
+        "prerequisite_type",
+        "minimum_completion_percentage",
+        "created_at",
+    )
+    list_filter = ("prerequisite_type", "course__tenant")
+    search_fields = (
+        "course__title",
+        "prerequisite_course__title",
+    )
+    list_select_related = ("course", "prerequisite_course", "course__tenant")
+    autocomplete_fields = ["course", "prerequisite_course"]
+    ordering = ("course__title", "prerequisite_type", "prerequisite_course__title")
+
+    fieldsets = (
+        (None, {"fields": ("course", "prerequisite_course")}),
+        ("Requirements", {"fields": ("prerequisite_type", "minimum_completion_percentage")}),
+    )
+
+
+@admin.register(ModulePrerequisite)
+class ModulePrerequisiteAdmin(admin.ModelAdmin):
+    """Admin for managing module prerequisites."""
+    list_display = (
+        "module",
+        "prerequisite_module",
+        "prerequisite_type",
+        "minimum_score",
+        "created_at",
+    )
+    list_filter = ("prerequisite_type", "module__course__tenant", "module__course")
+    search_fields = (
+        "module__title",
+        "prerequisite_module__title",
+        "module__course__title",
+    )
+    list_select_related = (
+        "module",
+        "prerequisite_module",
+        "module__course",
+        "module__course__tenant",
+    )
+    autocomplete_fields = ["module", "prerequisite_module"]
+    ordering = ("module__course__title", "module__order", "prerequisite_type")
+
+    fieldsets = (
+        (None, {"fields": ("module", "prerequisite_module")}),
+        ("Requirements", {"fields": ("prerequisite_type", "minimum_score")}),
+    )

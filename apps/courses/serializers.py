@@ -3,7 +3,7 @@ from rest_framework import serializers
 from apps.users.serializers import UserSerializer  # For instructor info
 from apps.files.models import File
 
-from .models import ContentItem, ContentVersion, Course, Module
+from .models import ContentItem, ContentVersion, Course, CoursePrerequisite, Module, ModulePrerequisite
 
 
 # --- Nested File Serializer for ContentItem ---
@@ -48,6 +48,218 @@ class ContentVersionSerializer(serializers.ModelSerializer):
         read_only_fields = fields  # Versions are read-only snapshots
 
 
+# --- Prerequisite Serializers ---
+
+
+class ModulePrerequisiteSerializer(serializers.ModelSerializer):
+    """Serializer for module prerequisite relationships."""
+    prerequisite_module_title = serializers.CharField(
+        source='prerequisite_module.title', read_only=True
+    )
+    prerequisite_module_order = serializers.IntegerField(
+        source='prerequisite_module.order', read_only=True
+    )
+    prerequisite_type_display = serializers.CharField(
+        source='get_prerequisite_type_display', read_only=True
+    )
+
+    class Meta:
+        model = ModulePrerequisite
+        fields = (
+            "id",
+            "module",
+            "prerequisite_module",
+            "prerequisite_module_title",
+            "prerequisite_module_order",
+            "prerequisite_type",
+            "prerequisite_type_display",
+            "minimum_score",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "id",
+            "module",
+            "prerequisite_module_title",
+            "prerequisite_module_order",
+            "prerequisite_type_display",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        """Validate the prerequisite relationship."""
+        module = attrs.get('module') or (self.instance.module if self.instance else None)
+        prereq_module = attrs.get('prerequisite_module') or (
+            self.instance.prerequisite_module if self.instance else None
+        )
+        
+        if module and prereq_module:
+            # Check self-reference
+            if module.id == prereq_module.id:
+                raise serializers.ValidationError(
+                    {"prerequisite_module": "A module cannot be its own prerequisite."}
+                )
+            
+            # Check same course or valid cross-course prerequisite
+            if module.course_id != prereq_module.course_id:
+                # Verify prerequisite course relationship exists
+                if not CoursePrerequisite.objects.filter(
+                    course=module.course,
+                    prerequisite_course=prereq_module.course
+                ).exists():
+                    raise serializers.ValidationError({
+                        "prerequisite_module": "Prerequisite module must be from the same course or from a prerequisite course."
+                    })
+        
+        # Validate minimum_score if provided
+        minimum_score = attrs.get('minimum_score')
+        if minimum_score is not None and (minimum_score < 0 or minimum_score > 100):
+            raise serializers.ValidationError({
+                "minimum_score": "Minimum score must be between 0 and 100."
+            })
+        
+        return attrs
+
+
+class CoursePrerequisiteSerializer(serializers.ModelSerializer):
+    """Serializer for course prerequisite relationships."""
+    prerequisite_course_title = serializers.CharField(
+        source='prerequisite_course.title', read_only=True
+    )
+    prerequisite_course_slug = serializers.CharField(
+        source='prerequisite_course.slug', read_only=True
+    )
+    prerequisite_type_display = serializers.CharField(
+        source='get_prerequisite_type_display', read_only=True
+    )
+
+    class Meta:
+        model = CoursePrerequisite
+        fields = (
+            "id",
+            "course",
+            "prerequisite_course",
+            "prerequisite_course_title",
+            "prerequisite_course_slug",
+            "prerequisite_type",
+            "prerequisite_type_display",
+            "minimum_completion_percentage",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "id",
+            "course",
+            "prerequisite_course_title",
+            "prerequisite_course_slug",
+            "prerequisite_type_display",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        """Validate the prerequisite relationship."""
+        course = attrs.get('course') or (self.instance.course if self.instance else None)
+        prereq_course = attrs.get('prerequisite_course') or (
+            self.instance.prerequisite_course if self.instance else None
+        )
+        
+        if course and prereq_course:
+            # Check self-reference
+            if course.id == prereq_course.id:
+                raise serializers.ValidationError(
+                    {"prerequisite_course": "A course cannot be its own prerequisite."}
+                )
+            
+            # Check same tenant
+            if course.tenant_id != prereq_course.tenant_id:
+                raise serializers.ValidationError({
+                    "prerequisite_course": "Prerequisite course must belong to the same tenant."
+                })
+            
+            # Check for circular dependencies
+            if self._creates_circular_dependency(course, prereq_course):
+                raise serializers.ValidationError({
+                    "prerequisite_course": "Adding this prerequisite would create a circular dependency."
+                })
+        
+        # Validate minimum_completion_percentage
+        min_completion = attrs.get('minimum_completion_percentage')
+        if min_completion is not None and (min_completion < 0 or min_completion > 100):
+            raise serializers.ValidationError({
+                "minimum_completion_percentage": "Minimum completion percentage must be between 0 and 100."
+            })
+        
+        return attrs
+
+    def _creates_circular_dependency(self, course, prereq_course):
+        """Check if adding this prerequisite creates a circular dependency."""
+        visited = set()
+        
+        def has_cycle(current_course_id, target_id):
+            if current_course_id == target_id:
+                return True
+            if current_course_id in visited:
+                return False
+            visited.add(current_course_id)
+            
+            prereqs = CoursePrerequisite.objects.filter(
+                course_id=current_course_id
+            ).values_list('prerequisite_course_id', flat=True)
+            
+            for prereq_id in prereqs:
+                if has_cycle(prereq_id, target_id):
+                    return True
+            return False
+        
+        return has_cycle(prereq_course.id, course.id)
+
+
+class ModulePrerequisiteListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing prerequisites in module responses."""
+    title = serializers.CharField(source='prerequisite_module.title', read_only=True)
+    order = serializers.IntegerField(source='prerequisite_module.order', read_only=True)
+    prerequisite_type_display = serializers.CharField(
+        source='get_prerequisite_type_display', read_only=True
+    )
+
+    class Meta:
+        model = ModulePrerequisite
+        fields = (
+            "id",
+            "prerequisite_module",
+            "title",
+            "order",
+            "prerequisite_type",
+            "prerequisite_type_display",
+            "minimum_score",
+        )
+        read_only_fields = fields
+
+
+class CoursePrerequisiteListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing prerequisites in course responses."""
+    title = serializers.CharField(source='prerequisite_course.title', read_only=True)
+    slug = serializers.CharField(source='prerequisite_course.slug', read_only=True)
+    prerequisite_type_display = serializers.CharField(
+        source='get_prerequisite_type_display', read_only=True
+    )
+
+    class Meta:
+        model = CoursePrerequisite
+        fields = (
+            "id",
+            "prerequisite_course",
+            "title",
+            "slug",
+            "prerequisite_type",
+            "prerequisite_type_display",
+            "minimum_completion_percentage",
+        )
+        read_only_fields = fields
+
+
 class ContentItemSerializer(serializers.ModelSerializer):
     content_type_display = serializers.CharField(
         source="get_content_type_display", read_only=True
@@ -72,6 +284,7 @@ class ContentItemSerializer(serializers.ModelSerializer):
             "file_id",
             "metadata",
             "is_published",
+            "is_required",
             "created_at",
             "updated_at",
         )
@@ -153,6 +366,12 @@ class ContentItemSerializer(serializers.ModelSerializer):
 class ModuleSerializer(serializers.ModelSerializer):
     # Nested listing of content items (read-only in module list/detail)
     content_items = ContentItemSerializer(many=True, read_only=True)
+    # Nested listing of prerequisites (read-only)
+    prerequisites_list = ModulePrerequisiteListSerializer(
+        source='prerequisites', many=True, read_only=True
+    )
+    # For checking if user has met prerequisites
+    prerequisites_met = serializers.SerializerMethodField()
 
     class Meta:
         model = Module
@@ -163,6 +382,8 @@ class ModuleSerializer(serializers.ModelSerializer):
             "course",
             "order",
             "content_items",
+            "prerequisites_list",
+            "prerequisites_met",
             "created_at",
             "updated_at",
         )
@@ -170,9 +391,34 @@ class ModuleSerializer(serializers.ModelSerializer):
             "id",
             "course",
             "content_items",
+            "prerequisites_list",
+            "prerequisites_met",
             "created_at",
             "updated_at",
         )  # Course is set via Course endpoint
+
+    def get_prerequisites_met(self, obj):
+        """Check if the current user has met all required prerequisites."""
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return None
+        
+        is_met, unmet = obj.are_prerequisites_met(request.user, check_type='REQUIRED')
+        if is_met:
+            return {"met": True, "unmet_count": 0, "unmet_modules": []}
+        
+        return {
+            "met": False,
+            "unmet_count": len(unmet),
+            "unmet_modules": [
+                {
+                    "id": str(item['module'].id),
+                    "title": item['module'].title,
+                    "reason": item['reason']
+                }
+                for item in unmet
+            ]
+        }
 
 
 # --- Course Serializers ---
@@ -192,6 +438,12 @@ class CourseSerializer(serializers.ModelSerializer):
     is_enrolled = serializers.SerializerMethodField()  # Add enrollment status for current user
     enrollment_id = serializers.SerializerMethodField()  # Add enrollment ID for current user
     progress_percentage = serializers.SerializerMethodField()  # Add progress percentage for current user
+    # Nested listing of prerequisites (read-only)
+    prerequisites_list = CoursePrerequisiteListSerializer(
+        source='prerequisites', many=True, read_only=True
+    )
+    # For checking if user has met prerequisites
+    prerequisites_met = serializers.SerializerMethodField()
     # Add thumbnail URL when File model is integrated
     # thumbnail_url = serializers.URLField(source='thumbnail.file_url', read_only=True, allow_null=True)
 
@@ -218,6 +470,8 @@ class CourseSerializer(serializers.ModelSerializer):
             "status_display",
             "tags",
             "modules",
+            "prerequisites_list",
+            "prerequisites_met",
             "enrollment_count",  # Add to fields
             "is_enrolled",  # Add enrollment status for current user
             "enrollment_id",  # Add enrollment ID for current user
@@ -231,6 +485,8 @@ class CourseSerializer(serializers.ModelSerializer):
             "tenant",
             "tenant_name",
             "modules",
+            "prerequisites_list",
+            "prerequisites_met",
             "enrollment_count",  # Make it read-only
             "is_enrolled",  # Make it read-only
             "enrollment_id",  # Make it read-only
@@ -271,15 +527,33 @@ class CourseSerializer(serializers.ModelSerializer):
         return instance
 
     def get_enrollment_count(self, obj):
-        """Calculate the number of active enrollments for this course."""
-        return obj.enrollments.filter(status='ACTIVE').count()
+        """Calculate the number of active enrollments for this course.
+        
+        Uses the _enrollment_count annotation from the viewset queryset if available,
+        otherwise falls back to a database query.
+        """
+        # Use annotation if available (set by CourseViewSet.get_queryset)
+        if hasattr(obj, '_enrollment_count'):
+            return obj._enrollment_count
+        # Fallback for when annotation is not present (e.g., single object retrieval)
+        from apps.enrollments.models import Enrollment
+        return obj.enrollments.filter(status=Enrollment.Status.ACTIVE).count()
 
     def get_is_enrolled(self, obj):
-        """Check if the current user is enrolled in this course."""
+        """Check if the current user is enrolled in this course.
+        
+        Uses the _is_enrolled annotation from the viewset queryset if available,
+        otherwise falls back to a database query.
+        """
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
             return False
         
+        # Use annotation if available (set by CourseViewSet.get_queryset)
+        if hasattr(obj, '_is_enrolled'):
+            return obj._is_enrolled
+        
+        # Fallback for when annotation is not present
         from apps.enrollments.models import Enrollment
         return Enrollment.objects.filter(
             course=obj, 
@@ -288,11 +562,21 @@ class CourseSerializer(serializers.ModelSerializer):
         ).exists()
 
     def get_enrollment_id(self, obj):
-        """Get the enrollment ID for the current user if enrolled."""
+        """Get the enrollment ID for the current user if enrolled.
+        
+        Uses the _enrollment_id annotation from the viewset queryset if available,
+        otherwise falls back to a database query.
+        """
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
             return None
         
+        # Use annotation if available (set by CourseViewSet.get_queryset)
+        if hasattr(obj, '_enrollment_id'):
+            enrollment_id = obj._enrollment_id
+            return str(enrollment_id) if enrollment_id else None
+        
+        # Fallback for when annotation is not present
         from apps.enrollments.models import Enrollment
         try:
             enrollment = Enrollment.objects.get(
@@ -305,11 +589,20 @@ class CourseSerializer(serializers.ModelSerializer):
             return None
 
     def get_progress_percentage(self, obj):
-        """Get the progress percentage for the current user if enrolled."""
+        """Get the progress percentage for the current user if enrolled.
+        
+        Uses the _progress_percentage annotation from the viewset queryset if available,
+        otherwise falls back to a database query.
+        """
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
             return None
         
+        # Use annotation if available (set by CourseViewSet.get_queryset)
+        if hasattr(obj, '_progress_percentage'):
+            return obj._progress_percentage
+        
+        # Fallback for when annotation is not present
         from apps.enrollments.models import Enrollment
         try:
             enrollment = Enrollment.objects.get(
@@ -320,3 +613,29 @@ class CourseSerializer(serializers.ModelSerializer):
             return enrollment.progress
         except Enrollment.DoesNotExist:
             return None
+
+    def get_prerequisites_met(self, obj):
+        """Check if the current user has met all required prerequisites for this course."""
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return None
+        
+        is_met, unmet = obj.are_prerequisites_met(request.user, check_type='REQUIRED')
+        if is_met:
+            return {"met": True, "unmet_count": 0, "unmet_courses": []}
+        
+        return {
+            "met": False,
+            "unmet_count": len(unmet),
+            "unmet_courses": [
+                {
+                    "id": str(item['course'].id),
+                    "title": item['course'].title,
+                    "slug": item['course'].slug,
+                    "reason": item['reason'],
+                    "current_progress": item.get('current_progress'),
+                    "required_completion": item.get('required_completion')
+                }
+                for item in unmet
+            ]
+        }

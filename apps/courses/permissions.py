@@ -1,8 +1,7 @@
 from rest_framework import permissions
 
 from apps.users.models import User
-
-# from apps.enrollments.models import Enrollment # Import when defined
+from apps.enrollments.models import Enrollment
 
 
 class IsCourseInstructorOrAdmin(permissions.BasePermission):
@@ -75,10 +74,9 @@ class IsEnrolledOrInstructorOrAdmin(permissions.BasePermission):
         if user.is_staff or (course.instructor == user):
             return True
 
-        # Check if enrolled (Requires Enrollment model)
-        # try:
-        #     return Enrollment.objects.filter(user=user, course=course, is_active=True).exists()
-        # except ImportError:
-        #      # Handle case where Enrollment model isn't available yet or app not installed
-        #      return False
-        return False  # Placeholder until Enrollment model is integrated
+        # Check if enrolled with active status
+        return Enrollment.objects.filter(
+            user=user,
+            course=course,
+            status=Enrollment.Status.ACTIVE
+        ).exists()

@@ -95,6 +95,143 @@ class Course(TimestampedModel):
         # If slug is unique per tenant:
         # unique_together = ('tenant', 'slug')
 
+    def get_all_prerequisites(self, prerequisite_type: str = None, include_indirect: bool = False) -> models.QuerySet:
+        """
+        Get all prerequisites for this course.
+        
+        Args:
+            prerequisite_type: Filter by type (REQUIRED, RECOMMENDED, COREQUISITE)
+            include_indirect: If True, recursively get prerequisites of prerequisites
+            
+        Returns:
+            QuerySet of Course objects that are prerequisites
+        """
+        from apps.courses.models import CoursePrerequisite
+        
+        prereq_qs = CoursePrerequisite.objects.filter(course=self)
+        if prerequisite_type:
+            prereq_qs = prereq_qs.filter(prerequisite_type=prerequisite_type)
+        
+        direct_prereqs = prereq_qs.values_list('prerequisite_course_id', flat=True)
+        
+        if not include_indirect:
+            return Course.objects.filter(id__in=direct_prereqs)
+        
+        # Recursively gather all prerequisites
+        all_prereq_ids = set(direct_prereqs)
+        to_process = list(direct_prereqs)
+        
+        while to_process:
+            current_id = to_process.pop(0)
+            indirect_prereqs = CoursePrerequisite.objects.filter(
+                course_id=current_id
+            )
+            if prerequisite_type:
+                indirect_prereqs = indirect_prereqs.filter(prerequisite_type=prerequisite_type)
+            
+            for prereq_id in indirect_prereqs.values_list('prerequisite_course_id', flat=True):
+                if prereq_id not in all_prereq_ids:
+                    all_prereq_ids.add(prereq_id)
+                    to_process.append(prereq_id)
+        
+        return Course.objects.filter(id__in=all_prereq_ids)
+
+    def are_prerequisites_met(self, user, check_type: str = 'REQUIRED') -> tuple[bool, list]:
+        """
+        Check if a user has met all prerequisites for this course.
+        
+        Args:
+            user: The User object to check
+            check_type: Which prerequisite type to check (REQUIRED, RECOMMENDED, COREQUISITE)
+            
+        Returns:
+            Tuple of (bool: all met, list: unmet prerequisite info)
+        """
+        from apps.courses.models import CoursePrerequisite
+        from apps.enrollments.models import Enrollment
+        
+        prerequisites = CoursePrerequisite.objects.filter(
+            course=self,
+            prerequisite_type=check_type
+        ).select_related('prerequisite_course')
+        
+        unmet = []
+        
+        for prereq in prerequisites:
+            prereq_course = prereq.prerequisite_course
+            
+            # Get enrollment for the prerequisite course
+            try:
+                enrollment = Enrollment.objects.get(
+                    user=user,
+                    course=prereq_course,
+                    status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+                )
+            except Enrollment.DoesNotExist:
+                unmet.append({
+                    'course': prereq_course,
+                    'reason': 'not_enrolled',
+                    'required_completion': prereq.minimum_completion_percentage
+                })
+                continue
+            
+            # Check completion percentage
+            if enrollment.progress < prereq.minimum_completion_percentage:
+                unmet.append({
+                    'course': prereq_course,
+                    'reason': 'not_completed',
+                    'current_progress': enrollment.progress,
+                    'required_completion': prereq.minimum_completion_percentage
+                })
+        
+        return (len(unmet) == 0, unmet)
+
+    def get_prerequisite_chain(self) -> list:
+        """
+        Get the ordered chain of prerequisite courses.
+        
+        Returns a list of courses in the order they should be taken,
+        considering all required prerequisites.
+        """
+        from apps.courses.models import CoursePrerequisite
+        
+        # Build dependency graph
+        all_prereqs = self.get_all_prerequisites(prerequisite_type='REQUIRED', include_indirect=True)
+        
+        # Topological sort using Kahn's algorithm
+        in_degree = {course.id: 0 for course in all_prereqs}
+        in_degree[self.id] = 0
+        
+        graph = {course.id: [] for course in all_prereqs}
+        graph[self.id] = []
+        
+        for course in list(all_prereqs) + [self]:
+            prereqs = CoursePrerequisite.objects.filter(
+                course=course,
+                prerequisite_type='REQUIRED'
+            ).values_list('prerequisite_course_id', flat=True)
+            
+            for prereq_id in prereqs:
+                if prereq_id in graph:
+                    graph[prereq_id].append(course.id)
+                    in_degree[course.id] = in_degree.get(course.id, 0) + 1
+        
+        # Process nodes with in_degree 0
+        queue = [cid for cid, degree in in_degree.items() if degree == 0]
+        result = []
+        
+        while queue:
+            current_id = queue.pop(0)
+            if current_id != self.id:  # Don't include self in chain
+                result.append(current_id)
+            
+            for dependent_id in graph.get(current_id, []):
+                in_degree[dependent_id] -= 1
+                if in_degree[dependent_id] == 0:
+                    queue.append(dependent_id)
+        
+        return list(Course.objects.filter(id__in=result).order_by('title'))
+
 
 class Module(TimestampedModel):
     """Represents a module or section within a Course."""
@@ -113,6 +250,144 @@ class Module(TimestampedModel):
         ordering = ["course", "order", "title"]
         # Ensure order is unique per course if strict ordering is required without gaps
         # unique_together = ('course', 'order')
+
+    def get_all_prerequisites(self, prerequisite_type: str = None, include_indirect: bool = False) -> models.QuerySet:
+        """
+        Get all prerequisites for this module.
+        
+        Args:
+            prerequisite_type: Filter by type (REQUIRED, RECOMMENDED, COREQUISITE)
+            include_indirect: If True, recursively get prerequisites of prerequisites
+            
+        Returns:
+            QuerySet of Module objects that are prerequisites
+        """
+        from apps.courses.models import ModulePrerequisite
+        
+        prereq_qs = ModulePrerequisite.objects.filter(module=self)
+        if prerequisite_type:
+            prereq_qs = prereq_qs.filter(prerequisite_type=prerequisite_type)
+        
+        direct_prereqs = prereq_qs.values_list('prerequisite_module_id', flat=True)
+        
+        if not include_indirect:
+            return Module.objects.filter(id__in=direct_prereqs)
+        
+        # Recursively gather all prerequisites
+        all_prereq_ids = set(direct_prereqs)
+        to_process = list(direct_prereqs)
+        
+        while to_process:
+            current_id = to_process.pop(0)
+            indirect_prereqs = ModulePrerequisite.objects.filter(
+                module_id=current_id
+            )
+            if prerequisite_type:
+                indirect_prereqs = indirect_prereqs.filter(prerequisite_type=prerequisite_type)
+            
+            for prereq_id in indirect_prereqs.values_list('prerequisite_module_id', flat=True):
+                if prereq_id not in all_prereq_ids:
+                    all_prereq_ids.add(prereq_id)
+                    to_process.append(prereq_id)
+        
+        return Module.objects.filter(id__in=all_prereq_ids)
+
+    def are_prerequisites_met(self, user, check_type: str = 'REQUIRED') -> tuple[bool, list]:
+        """
+        Check if a user has met all prerequisites for this module.
+        
+        Args:
+            user: The User object to check
+            check_type: Which prerequisite type to check (REQUIRED, RECOMMENDED, COREQUISITE)
+            
+        Returns:
+            Tuple of (bool: all met, list: unmet prerequisite info)
+        """
+        from apps.courses.models import ModulePrerequisite
+        from apps.enrollments.models import Enrollment, LearnerProgress
+        
+        prerequisites = ModulePrerequisite.objects.filter(
+            module=self,
+            prerequisite_type=check_type
+        ).select_related('prerequisite_module')
+        
+        unmet = []
+        
+        for prereq in prerequisites:
+            prereq_module = prereq.prerequisite_module
+            
+            # Get enrollment for the prerequisite module's course
+            try:
+                enrollment = Enrollment.objects.get(
+                    user=user,
+                    course=prereq_module.course,
+                    status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+                )
+            except Enrollment.DoesNotExist:
+                unmet.append({
+                    'module': prereq_module,
+                    'reason': 'not_enrolled',
+                    'required_score': prereq.minimum_score
+                })
+                continue
+            
+            # Calculate module completion percentage
+            total_required_items = prereq_module.content_items.filter(
+                is_required=True, is_published=True
+            ).count()
+            
+            if total_required_items == 0:
+                # Module has no required content - consider it completable
+                continue
+            
+            completed_items = LearnerProgress.objects.filter(
+                enrollment=enrollment,
+                content_item__module=prereq_module,
+                content_item__is_required=True,
+                content_item__is_published=True,
+                status=LearnerProgress.Status.COMPLETED
+            ).count()
+            
+            completion_percentage = (completed_items / total_required_items) * 100
+            
+            # Check minimum score if specified
+            if prereq.minimum_score is not None:
+                # Get average score from assessments in this module
+                scores = LearnerProgress.objects.filter(
+                    enrollment=enrollment,
+                    content_item__module=prereq_module,
+                    content_item__content_type='QUIZ',
+                    status=LearnerProgress.Status.COMPLETED
+                ).values_list('progress_details', flat=True)
+                
+                avg_score = 0
+                score_count = 0
+                for details in scores:
+                    if isinstance(details, dict) and 'score' in details:
+                        avg_score += details['score']
+                        score_count += 1
+                
+                if score_count > 0:
+                    avg_score = avg_score / score_count
+                
+                if avg_score < prereq.minimum_score:
+                    unmet.append({
+                        'module': prereq_module,
+                        'reason': 'score_not_met',
+                        'current_score': avg_score,
+                        'required_score': prereq.minimum_score
+                    })
+                    continue
+            
+            # Check completion (100% required)
+            if completion_percentage < 100:
+                unmet.append({
+                    'module': prereq_module,
+                    'reason': 'not_completed',
+                    'completion_percentage': completion_percentage
+                })
+        
+        return (len(unmet) == 0, unmet)
 
 
 class ContentItem(TimestampedModel):
@@ -190,6 +465,10 @@ class ContentItem(TimestampedModel):
     is_published = models.BooleanField(
         default=False, db_index=True
     )  # Allow draft content items
+    is_required = models.BooleanField(
+        default=True,
+        help_text="Whether this content item is required for course completion"
+    )
 
     def __str__(self):
         return f"{self.title} ({self.get_content_type_display()})"
@@ -198,6 +477,173 @@ class ContentItem(TimestampedModel):
         ordering = ["module", "order", "title"]
         # Ensure order is unique per module if strict ordering is required
         # unique_together = ('module', 'order')
+
+
+class ModulePrerequisite(TimestampedModel):
+    """
+    Defines prerequisite relationships between modules.
+    
+    A module can have multiple prerequisites, and each prerequisite can be:
+    - REQUIRED: Must be completed before starting this module
+    - RECOMMENDED: Suggested but not enforced
+    - COREQUISITE: Can be taken together (concurrent requirement)
+    """
+
+    class PrerequisiteType(models.TextChoices):
+        REQUIRED = "REQUIRED", _("Required")
+        RECOMMENDED = "RECOMMENDED", _("Recommended")
+        COREQUISITE = "COREQUISITE", _("Corequisite")
+
+    module = models.ForeignKey(
+        Module,
+        related_name="prerequisites",
+        on_delete=models.CASCADE,
+        help_text="The module that has the prerequisite requirement"
+    )
+    prerequisite_module = models.ForeignKey(
+        Module,
+        related_name="required_for",
+        on_delete=models.CASCADE,
+        help_text="The module that must be completed first"
+    )
+    prerequisite_type = models.CharField(
+        max_length=15,
+        choices=PrerequisiteType.choices,
+        default=PrerequisiteType.REQUIRED,
+        help_text="Type of prerequisite relationship"
+    )
+    minimum_score = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Minimum score required in prerequisite module (0-100, null means completion only)"
+    )
+
+    def __str__(self):
+        return f"{self.module.title} requires {self.prerequisite_module.title} ({self.prerequisite_type})"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        
+        # Prevent self-referential prerequisites
+        if self.module_id == self.prerequisite_module_id:
+            raise ValidationError("A module cannot be its own prerequisite.")
+        
+        # Ensure both modules belong to the same course or prerequisite is from a prerequisite course
+        if self.module.course_id != self.prerequisite_module.course_id:
+            # Check if prerequisite module's course is a prerequisite of this module's course
+            from apps.courses.models import CoursePrerequisite
+            is_valid_cross_course = CoursePrerequisite.objects.filter(
+                course=self.module.course,
+                prerequisite_course=self.prerequisite_module.course
+            ).exists()
+            if not is_valid_cross_course:
+                raise ValidationError(
+                    "Prerequisite module must be from the same course or from a prerequisite course."
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        unique_together = ('module', 'prerequisite_module')
+        ordering = ['module', 'prerequisite_type', 'prerequisite_module__order']
+        verbose_name = "Module Prerequisite"
+        verbose_name_plural = "Module Prerequisites"
+
+
+class CoursePrerequisite(TimestampedModel):
+    """
+    Defines prerequisite relationships between courses.
+    
+    A course can have multiple prerequisites, and each prerequisite can be:
+    - REQUIRED: Must be completed before enrolling in this course
+    - RECOMMENDED: Suggested but not enforced
+    - COREQUISITE: Can be taken together (concurrent enrollment allowed)
+    """
+
+    class PrerequisiteType(models.TextChoices):
+        REQUIRED = "REQUIRED", _("Required")
+        RECOMMENDED = "RECOMMENDED", _("Recommended")
+        COREQUISITE = "COREQUISITE", _("Corequisite")
+
+    course = models.ForeignKey(
+        Course,
+        related_name="prerequisites",
+        on_delete=models.CASCADE,
+        help_text="The course that has the prerequisite requirement"
+    )
+    prerequisite_course = models.ForeignKey(
+        Course,
+        related_name="required_for",
+        on_delete=models.CASCADE,
+        help_text="The course that must be completed first"
+    )
+    prerequisite_type = models.CharField(
+        max_length=15,
+        choices=PrerequisiteType.choices,
+        default=PrerequisiteType.REQUIRED,
+        help_text="Type of prerequisite relationship"
+    )
+    minimum_completion_percentage = models.PositiveIntegerField(
+        default=100,
+        help_text="Minimum completion percentage required (0-100)"
+    )
+
+    def __str__(self):
+        return f"{self.course.title} requires {self.prerequisite_course.title} ({self.prerequisite_type})"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        
+        # Prevent self-referential prerequisites
+        if self.course_id == self.prerequisite_course_id:
+            raise ValidationError("A course cannot be its own prerequisite.")
+        
+        # Ensure both courses belong to the same tenant
+        if self.course.tenant_id != self.prerequisite_course.tenant_id:
+            raise ValidationError("Prerequisite course must belong to the same tenant.")
+        
+        # Check for circular dependencies
+        if self._creates_circular_dependency():
+            raise ValidationError(
+                f"Adding this prerequisite would create a circular dependency."
+            )
+
+    def _creates_circular_dependency(self):
+        """Check if adding this prerequisite creates a circular dependency."""
+        visited = set()
+        
+        def has_cycle(course_id, target_id):
+            if course_id == target_id:
+                return True
+            if course_id in visited:
+                return False
+            visited.add(course_id)
+            
+            # Get all prerequisites of this course
+            prereqs = CoursePrerequisite.objects.filter(
+                course_id=course_id
+            ).values_list('prerequisite_course_id', flat=True)
+            
+            for prereq_id in prereqs:
+                if has_cycle(prereq_id, target_id):
+                    return True
+            return False
+        
+        # Check if the prerequisite course (or any of its prerequisites) 
+        # eventually leads back to the current course
+        return has_cycle(self.prerequisite_course_id, self.course_id)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        unique_together = ('course', 'prerequisite_course')
+        ordering = ['course', 'prerequisite_type', 'prerequisite_course__title']
+        verbose_name = "Course Prerequisite"
+        verbose_name_plural = "Course Prerequisites"
 
 
 class ContentVersion(TimestampedModel):
