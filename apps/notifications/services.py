@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import Any, Dict, List
 
 from django.conf import settings
@@ -125,12 +126,15 @@ class NotificationService:
                 == "django.core.mail.backends.console.EmailBackend"
             )
         elif method == DeliveryMethod.SMS:
-            # Check for SMS provider keys/settings
-            # return bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN) # Example
-            return False  # Placeholder
+            # Check for Twilio SMS provider settings
+            return bool(
+                getattr(settings, 'TWILIO_ACCOUNT_SID', None)
+                and getattr(settings, 'TWILIO_AUTH_TOKEN', None)
+                and getattr(settings, 'TWILIO_FROM_NUMBER', None)
+            )
         elif method == DeliveryMethod.PUSH:
-            # Check for Push notification service keys (FCM, APNS)
-            return False  # Placeholder
+            # Check for FCM push notification service settings
+            return bool(getattr(settings, 'FCM_SERVER_KEY', None))
         elif method == DeliveryMethod.IN_APP:
             return True  # In-app is usually just DB storage, enabled by default
         return False
@@ -225,20 +229,63 @@ class NotificationService:
         user_name = context.get("user_name", "Learner")
         course_name = context.get("course_name", "the course")
 
+        # Additional context keys
+        assessment_title = context.get("assessment_title", "the assessment")
+        due_date = context.get("due_date", "soon")
+        score = context.get("score", "")
+        max_score = context.get("max_score", "")
+        content_title = context.get("content_title", "New content")
+        announcement_title = context.get("announcement_title", "Announcement")
+        announcement_body = context.get("announcement_body", "")
+        alert_message = context.get("alert_message", "")
+        instructor_name = context.get("instructor_name", "Your instructor")
+
         try:
             if type_str == NotificationType.COURSE_ENROLLMENT:
                 subject = f"You are enrolled in {course_name}"
                 message = f"Hi {user_name},\n\nYou have been successfully enrolled in the course: {course_name}.\n\nStart learning now!"
                 # html_message = render_to_string('notifications/email/enrollment.html', context)
+
             elif type_str == NotificationType.COURSE_COMPLETION:
                 subject = f"Congratulations on completing {course_name}!"
                 message = f"Hi {user_name},\n\nWell done! You have successfully completed the course: {course_name}.\n\nYour certificate may be available shortly."
                 # html_message = render_to_string(...)
+
             elif type_str == NotificationType.CERTIFICATE_ISSUED:
                 subject = f"Your certificate for {course_name} is available"
                 message = f"Hi {user_name},\n\nYour certificate for completing {course_name} has been issued and is now available."
                 # html_message = render_to_string(...)
-            # Add cases for other notification types...
+
+            elif type_str == NotificationType.ASSESSMENT_SUBMISSION:
+                subject = f"Assessment submitted: {assessment_title}"
+                message = f"Hi {user_name},\n\nYour submission for '{assessment_title}' in {course_name} has been received.\n\nYou will be notified once it has been graded."
+                # html_message = render_to_string(...)
+
+            elif type_str == NotificationType.ASSESSMENT_GRADED:
+                score_text = f"Score: {score}/{max_score}" if score and max_score else ""
+                subject = f"Your assessment has been graded: {assessment_title}"
+                message = f"Hi {user_name},\n\nYour submission for '{assessment_title}' in {course_name} has been graded.\n\n{score_text}\n\nCheck your results for detailed feedback."
+                # html_message = render_to_string(...)
+
+            elif type_str == NotificationType.DEADLINE_REMINDER:
+                subject = f"Reminder: {assessment_title} due {due_date}"
+                message = f"Hi {user_name},\n\nThis is a friendly reminder that '{assessment_title}' in {course_name} is due {due_date}.\n\nDon't forget to submit your work on time!"
+                # html_message = render_to_string(...)
+
+            elif type_str == NotificationType.NEW_CONTENT_AVAILABLE:
+                subject = f"New content available in {course_name}"
+                message = f"Hi {user_name},\n\nNew content '{content_title}' has been published in {course_name}.\n\nLog in to start learning!"
+                # html_message = render_to_string(...)
+
+            elif type_str == NotificationType.ANNOUNCEMENT:
+                subject = announcement_title or f"Announcement from {course_name}"
+                message = f"Hi {user_name},\n\n{instructor_name} posted an announcement:\n\n{announcement_body}"
+                # html_message = render_to_string(...)
+
+            elif type_str == NotificationType.SYSTEM_ALERT:
+                subject = "System Alert"
+                message = f"Hi {user_name},\n\n{alert_message or 'There is a system notification that requires your attention.'}"
+                # html_message = render_to_string(...)
         except Exception as e:
             logger.error(
                 f"Error generating content for notification type {type_str}: {e}",
@@ -315,11 +362,11 @@ class InAppService:
 
 
 class SMSService:
-    """Handles sending SMS notifications. (Placeholder)"""
+    """Handles sending SMS notifications via Twilio."""
 
     @staticmethod
     def send_sms_notification(notification: Notification) -> bool:
-        """Sends the notification message via SMS."""
+        """Sends the notification message via SMS using Twilio."""
         recipient = notification.recipient
         # Need user's phone number, likely stored in UserProfile
         phone_number = getattr(
@@ -332,6 +379,17 @@ class SMSService:
             )
             return False
 
+        # Check if Twilio is configured
+        if not all([
+            getattr(settings, 'TWILIO_ACCOUNT_SID', None),
+            getattr(settings, 'TWILIO_AUTH_TOKEN', None),
+            getattr(settings, 'TWILIO_FROM_NUMBER', None)
+        ]):
+            logger.warning(
+                f"SMS sending skipped for notification {notification.id}: Twilio not configured."
+            )
+            return False
+
         # Truncate message if needed for SMS length limits
         sms_message = (
             (notification.message[:157] + "...")
@@ -339,37 +397,56 @@ class SMSService:
             else notification.message
         )
 
-        # --- Integration with SMS Provider (e.g., Twilio) ---
-        # try:
-        #     from twilio.rest import Client
-        #     client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-        #     message = client.messages.create(
-        #         body=sms_message,
-        #         from_=settings.TWILIO_FROM_NUMBER,
-        #         to=phone_number
-        #     )
-        #     logger.info(f"SMS sent successfully for notification {notification.id} to {phone_number} (SID: {message.sid})")
-        #     return True
-        # except Exception as e:
-        #      logger.error(f"Failed to send SMS for notification {notification.id} to {phone_number}: {e}", exc_info=True)
-        #      return False
-        # ----------------------------------------------------
-        logger.warning(
-            f"SMS sending not implemented. Skipped for notification {notification.id}."
-        )
-        return False
+        try:
+            from twilio.rest import Client
+            
+            client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+            message = client.messages.create(
+                body=sms_message,
+                from_=settings.TWILIO_FROM_NUMBER,
+                to=phone_number
+            )
+            logger.info(
+                f"SMS sent successfully for notification {notification.id} to {phone_number} (SID: {message.sid})"
+            )
+            return True
+        except ImportError:
+            logger.error(
+                "Twilio library not installed. Run: pip install twilio"
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                f"Failed to send SMS for notification {notification.id} to {phone_number}: {e}",
+                exc_info=True
+            )
+            return False
 
 
 class PushService:
-    """Handles sending Push notifications. (Placeholder)"""
+    """Handles sending Push notifications via Firebase Cloud Messaging (FCM)."""
 
     @staticmethod
     def send_push_notification(notification: Notification) -> bool:
-        """Sends a push notification to user's registered devices."""
+        """Sends a push notification to user's registered devices via FCM."""
+        from .models import UserDevice
+        
         recipient = notification.recipient
-        # Requires storing device tokens (e.g., FCM tokens) associated with the user
-        # device_tokens = UserDevice.objects.filter(user=recipient, is_active=True).values_list('token', flat=True)
-        device_tokens = []  # Placeholder
+        
+        # Check if FCM is configured
+        fcm_server_key = getattr(settings, 'FCM_SERVER_KEY', None)
+        if not fcm_server_key:
+            logger.warning(
+                f"Push notification skipped for {notification.id}: FCM not configured."
+            )
+            return False
+        
+        # Get active device tokens for the user
+        device_tokens = list(
+            UserDevice.objects.filter(
+                user=recipient, is_active=True
+            ).values_list('token', flat=True)
+        )
 
         if not device_tokens:
             logger.warning(
@@ -380,27 +457,86 @@ class PushService:
         push_title = (
             notification.subject or notification.get_notification_type_display()
         )
-        push_body = notification.message  # Truncate if needed
+        push_body = notification.message[:200] if len(notification.message) > 200 else notification.message
         push_data = {
             "notification_id": str(notification.id),
-            "action_url": notification.action_url,
+            "action_url": notification.action_url or "",
+            "notification_type": notification.notification_type,
         }
 
-        # --- Integration with Push Service (e.g., Firebase FCM, django-push-notifications) ---
-        # try:
-        #     from push_notifications.models import GCMDevice # Example library
-        #     GCMDevice.objects.filter(registration_id__in=device_tokens).send_message(
-        #         push_body,
-        #         title=push_title,
-        #         extra=push_data
-        #     )
-        #     logger.info(f"Push notification sent successfully for notification {notification.id} to {len(device_tokens)} devices.")
-        #     return True
-        # except Exception as e:
-        #      logger.error(f"Failed to send Push notification for {notification.id}: {e}", exc_info=True)
-        #      return False
-        # --------------------------------------------------------------------------------------
-        logger.warning(
-            f"Push notification sending not implemented. Skipped for notification {notification.id}."
-        )
-        return False
+        try:
+            import requests
+            
+            # FCM HTTP v1 API endpoint
+            fcm_url = "https://fcm.googleapis.com/fcm/send"
+            
+            headers = {
+                "Authorization": f"key={fcm_server_key}",
+                "Content-Type": "application/json",
+            }
+            
+            # Send to multiple devices
+            payload = {
+                "registration_ids": device_tokens[:1000],  # FCM limit is 1000 tokens per request
+                "notification": {
+                    "title": push_title,
+                    "body": push_body,
+                },
+                "data": push_data,
+            }
+            
+            response = requests.post(fcm_url, json=payload, headers=headers, timeout=10)
+            response_data = response.json()
+            
+            if response.status_code == 200:
+                success_count = response_data.get("success", 0)
+                failure_count = response_data.get("failure", 0)
+                
+                # Handle invalid tokens
+                if failure_count > 0 and "results" in response_data:
+                    PushService._handle_fcm_errors(device_tokens, response_data["results"])
+                
+                logger.info(
+                    f"Push notification sent for {notification.id}: {success_count} success, {failure_count} failures"
+                )
+                
+                # Update last_used_at for successful devices
+                UserDevice.objects.filter(
+                    user=recipient, is_active=True
+                ).update(last_used_at=timezone.now())
+                
+                return success_count > 0
+            else:
+                logger.error(
+                    f"FCM request failed for notification {notification.id}: {response.status_code} - {response.text}"
+                )
+                return False
+                
+        except ImportError:
+            logger.error("requests library not installed. Run: pip install requests")
+            return False
+        except Exception as e:
+            logger.error(
+                f"Failed to send Push notification for {notification.id}: {e}",
+                exc_info=True
+            )
+            return False
+
+    @staticmethod
+    def _handle_fcm_errors(tokens: List[str], results: List[Dict]) -> None:
+        """Handle FCM response errors and deactivate invalid tokens."""
+        from .models import UserDevice
+        
+        invalid_tokens = []
+        for i, result in enumerate(results):
+            if "error" in result:
+                error = result["error"]
+                # These errors indicate the token is no longer valid
+                if error in ["NotRegistered", "InvalidRegistration"]:
+                    if i < len(tokens):
+                        invalid_tokens.append(tokens[i])
+        
+        if invalid_tokens:
+            # Deactivate invalid tokens
+            UserDevice.objects.filter(token__in=invalid_tokens).update(is_active=False)
+            logger.info(f"Deactivated {len(invalid_tokens)} invalid FCM tokens")

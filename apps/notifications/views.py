@@ -6,11 +6,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 
-from .models import Notification, NotificationPreference
+from .models import Announcement, Notification, NotificationPreference, NotificationType, UserDevice
 from .serializers import (
+    AnnouncementSerializer,
     NotificationSerializer,
     NotificationPreferenceSerializer,
-    NotificationPreferenceUpdateSerializer
+    NotificationPreferenceUpdateSerializer,
+    UserDeviceSerializer,
 )
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
@@ -150,3 +152,225 @@ class NotificationPreferenceView(generics.RetrieveUpdateAPIView):
             instance.save(update_fields=update_fields)
             logger.info(f"Updated notification preferences for user {self.request.user.id}")
         # Serializer used for response is NotificationPreferenceSerializer (read serializer)
+
+
+@extend_schema(tags=['Notifications'])
+class UserDeviceViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing user devices for push notifications.
+    Users can register, list, update, and deactivate their devices.
+    """
+    serializer_class = UserDeviceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        """Users can only see their own devices."""
+        # Handle schema generation request
+        if getattr(self, 'swagger_fake_view', False):
+            return UserDevice.objects.none()
+        
+        user = self.request.user
+        if not user.is_authenticated:
+            return UserDevice.objects.none()
+        
+        return UserDevice.objects.filter(user=user).order_by('-created_at')
+    
+    def perform_create(self, serializer):
+        """Associate the device with the current user."""
+        # Note: The serializer's create method handles user assignment
+        # and updating existing tokens
+        serializer.save()
+        logger.info(f"Device registered for user {self.request.user.id}")
+    
+    @extend_schema(
+        request=None,
+        responses={200: UserDeviceSerializer},
+        summary="Deactivate a device"
+    )
+    @action(detail=True, methods=['post'], url_path='deactivate')
+    def deactivate(self, request, pk=None):
+        """Deactivate a device (mark as inactive for push notifications)."""
+        device = self.get_object()
+        device.is_active = False
+        device.save(update_fields=['is_active', 'updated_at'])
+        logger.info(f"Device {pk} deactivated for user {request.user.id}")
+        serializer = self.get_serializer(device)
+        return Response(serializer.data)
+    
+    @extend_schema(
+        request=None,
+        responses={200: UserDeviceSerializer},
+        summary="Reactivate a device"
+    )
+    @action(detail=True, methods=['post'], url_path='activate')
+    def activate(self, request, pk=None):
+        """Reactivate a previously deactivated device."""
+        device = self.get_object()
+        device.is_active = True
+        device.save(update_fields=['is_active', 'updated_at'])
+        logger.info(f"Device {pk} reactivated for user {request.user.id}")
+        serializer = self.get_serializer(device)
+        return Response(serializer.data)
+
+
+@extend_schema(tags=['Notifications'])
+class AnnouncementViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing admin announcements.
+    Admins can create, update, and send announcements to targeted user groups.
+    """
+    serializer_class = AnnouncementSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    
+    def get_queryset(self):
+        """Return announcements for the current tenant."""
+        # Handle schema generation request
+        if getattr(self, 'swagger_fake_view', False):
+            return Announcement.objects.none()
+        
+        user = self.request.user
+        if not user.is_authenticated:
+            return Announcement.objects.none()
+        
+        # Filter by tenant if available in request
+        if hasattr(self.request, 'tenant') and self.request.tenant:
+            return Announcement.objects.filter(tenant=self.request.tenant).order_by('-created_at')
+        
+        # For superusers, show all announcements
+        if user.is_superuser:
+            return Announcement.objects.all().order_by('-created_at')
+        
+        return Announcement.objects.none()
+    
+    def perform_create(self, serializer):
+        """Set author and tenant automatically."""
+        save_kwargs = {'author': self.request.user}
+        
+        # Set tenant from request if available
+        if hasattr(self.request, 'tenant') and self.request.tenant:
+            save_kwargs['tenant'] = self.request.tenant
+        
+        serializer.save(**save_kwargs)
+        logger.info(f"Announcement created by user {self.request.user.id}")
+    
+    @extend_schema(
+        request=None,
+        responses={
+            200: AnnouncementSerializer,
+            400: OpenApiResponse(description="Cannot send announcement (invalid status or configuration)")
+        },
+        summary="Send announcement to target users"
+    )
+    @action(detail=True, methods=['post'], url_path='send')
+    def send(self, request, pk=None):
+        """
+        Send the announcement to target users, creating notifications for each.
+        Only DRAFT or SCHEDULED announcements can be sent.
+        """
+        announcement = self.get_object()
+        
+        # Validate announcement status
+        if announcement.status not in [Announcement.Status.DRAFT, Announcement.Status.SCHEDULED]:
+            return Response(
+                {'error': f'Cannot send announcement with status {announcement.get_status_display()}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get target users based on target_type
+        target_users = self._get_target_users(announcement)
+        
+        if not target_users:
+            return Response(
+                {'error': 'No target users found for this announcement'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create notifications for each target user
+        notifications = []
+        for user in target_users:
+            notifications.append(Notification(
+                recipient=user,
+                notification_type=NotificationType.ANNOUNCEMENT,
+                subject=announcement.title,
+                message=announcement.message,
+                status=Notification.Status.SENT,
+                sent_at=timezone.now(),
+                delivery_methods=['IN_APP'],
+            ))
+        
+        # Bulk create notifications
+        Notification.objects.bulk_create(notifications)
+        
+        # Update announcement status
+        announcement.status = Announcement.Status.SENT
+        announcement.sent_at = timezone.now()
+        announcement.recipients_count = len(notifications)
+        announcement.save(update_fields=['status', 'sent_at', 'recipients_count', 'updated_at'])
+        
+        logger.info(
+            f"Announcement {pk} sent to {len(notifications)} users by {request.user.id}"
+        )
+        
+        serializer = self.get_serializer(announcement)
+        return Response(serializer.data)
+    
+    def _get_target_users(self, announcement):
+        """Get the list of users to send the announcement to."""
+        from apps.users.models import User
+        from apps.enrollments.models import Enrollment
+        
+        if announcement.target_type == Announcement.TargetType.ALL_TENANT:
+            # All active users in the tenant
+            return User.objects.filter(
+                tenant=announcement.tenant,
+                is_active=True
+            )
+        
+        elif announcement.target_type == Announcement.TargetType.COURSE_ENROLLED:
+            # Users enrolled in the target course
+            if not announcement.target_course:
+                return User.objects.none()
+            
+            enrolled_user_ids = Enrollment.objects.filter(
+                course=announcement.target_course,
+                status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED]
+            ).values_list('user_id', flat=True)
+            
+            return User.objects.filter(id__in=enrolled_user_ids, is_active=True)
+        
+        elif announcement.target_type == Announcement.TargetType.SPECIFIC_USERS:
+            # Specific users by ID
+            if not announcement.target_user_ids:
+                return User.objects.none()
+            
+            return User.objects.filter(
+                id__in=announcement.target_user_ids,
+                tenant=announcement.tenant,
+                is_active=True
+            )
+        
+        return User.objects.none()
+    
+    @extend_schema(
+        request=None,
+        responses={200: AnnouncementSerializer},
+        summary="Cancel a scheduled announcement"
+    )
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """Cancel a scheduled or draft announcement."""
+        announcement = self.get_object()
+        
+        if announcement.status in [Announcement.Status.SENT, Announcement.Status.CANCELLED]:
+            return Response(
+                {'error': f'Cannot cancel announcement with status {announcement.get_status_display()}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        announcement.status = Announcement.Status.CANCELLED
+        announcement.save(update_fields=['status', 'updated_at'])
+        
+        logger.info(f"Announcement {pk} cancelled by {request.user.id}")
+        
+        serializer = self.get_serializer(announcement)
+        return Response(serializer.data)

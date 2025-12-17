@@ -131,3 +131,99 @@ class NotificationPreference(TimestampedModel):
 # The functions create_user_notification_preferences and potentially save_user_profile (if you had it)
 # should be moved to signals.py
 #
+
+
+class UserDevice(TimestampedModel):
+    """Stores device tokens for push notifications (FCM, APNS)."""
+
+    class DeviceType(models.TextChoices):
+        ANDROID = "ANDROID", _("Android")
+        IOS = "IOS", _("iOS")
+        WEB = "WEB", _("Web Browser")
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="devices"
+    )
+    device_type = models.CharField(
+        max_length=10, choices=DeviceType.choices, default=DeviceType.WEB
+    )
+    token = models.TextField(
+        help_text="FCM registration token or APNS device token"
+    )
+    device_name = models.CharField(
+        max_length=255, blank=True, help_text="User-friendly device name (e.g., 'Chrome on MacOS')"
+    )
+    is_active = models.BooleanField(
+        default=True, help_text="Set to False when token becomes invalid"
+    )
+    last_used_at = models.DateTimeField(
+        null=True, blank=True, help_text="Last time this device received a notification"
+    )
+
+    def __str__(self):
+        return f"{self.user.email}'s {self.get_device_type_display()} device"
+
+    class Meta:
+        ordering = ["-created_at"]
+        # Ensure unique token per user (a token should only belong to one user)
+        unique_together = ("user", "token")
+
+
+class Announcement(TimestampedModel):
+    """
+    Represents an admin announcement that can be sent to multiple users.
+    Can target all users in a tenant, enrolled users in a course, etc.
+    """
+    
+    class TargetType(models.TextChoices):
+        ALL_TENANT = "ALL_TENANT", _("All Users in Tenant")
+        COURSE_ENROLLED = "COURSE_ENROLLED", _("Course Enrolled Users")
+        SPECIFIC_USERS = "SPECIFIC_USERS", _("Specific Users")
+    
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", _("Draft")
+        SCHEDULED = "SCHEDULED", _("Scheduled")
+        SENT = "SENT", _("Sent")
+        CANCELLED = "CANCELLED", _("Cancelled")
+    
+    # From apps.core.models import Tenant if needed
+    tenant = models.ForeignKey(
+        'core.Tenant', on_delete=models.CASCADE, related_name='announcements'
+    )
+    author = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name='authored_announcements'
+    )
+    
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    
+    target_type = models.CharField(
+        max_length=20, choices=TargetType.choices, default=TargetType.ALL_TENANT
+    )
+    # For COURSE_ENROLLED target type - store course ID
+    target_course = models.ForeignKey(
+        'courses.Course', on_delete=models.SET_NULL, 
+        null=True, blank=True, related_name='announcements'
+    )
+    # For SPECIFIC_USERS target type - store list of user IDs as JSON
+    target_user_ids = models.JSONField(
+        default=list, blank=True, 
+        help_text="List of user UUIDs for SPECIFIC_USERS target type"
+    )
+    
+    status = models.CharField(
+        max_length=15, choices=Status.choices, default=Status.DRAFT
+    )
+    scheduled_at = models.DateTimeField(
+        null=True, blank=True, help_text="Scheduled time to send announcement"
+    )
+    sent_at = models.DateTimeField(null=True, blank=True)
+    recipients_count = models.PositiveIntegerField(
+        default=0, help_text="Number of notifications created from this announcement"
+    )
+    
+    def __str__(self):
+        return f"Announcement: {self.title} ({self.get_status_display()})"
+    
+    class Meta:
+        ordering = ["-created_at"]
